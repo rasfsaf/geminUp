@@ -26,6 +26,7 @@ www.google.com
 
 # Antigravity / Cloud Code Gemini transport
 antigravity.google
+antigravity.google.com
 *.antigravity.google
 cloudcode-pa.googleapis.com
 daily-cloudcode-pa.googleapis.com

@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  integration:
+  windows-transport:
     runs-on: windows-latest
     timeout-minutes: 15
 
@@ -29,4 +29,40 @@ jobs:
           if ($generated.Count) {
             $generated.FullName | Write-Error
             exit 1
+          }
+
+  android-client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build unsigned Android release from source
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Verify committed APK identity and release signature
+        shell: pwsh
+        run: |
+          $apksigner = Get-ChildItem "$env:ANDROID_HOME/build-tools" -Filter apksigner -Recurse |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          $aapt = Get-ChildItem "$env:ANDROID_HOME/build-tools" -Filter aapt -Recurse |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if ($null -eq $apksigner -or $null -eq $aapt) { throw 'Android verification tools are missing.' }
+          & $apksigner.FullName verify --verbose --print-certs geminUp.apk
+          if ($LASTEXITCODE -ne 0) { throw 'geminUp.apk signature verification failed.' }
+          $badging = & $aapt.FullName dump badging geminUp.apk
+          if ($LASTEXITCODE -ne 0 -or $badging -notmatch "package: name='io.github.rasfsaf.geminup'" -or
+              $badging -match 'application-debuggable') {
+            throw 'Committed geminUp.apk is not the expected production package.'
           }

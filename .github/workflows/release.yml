@@ -22,6 +22,12 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - name: Test
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-GeminUp.ps1
@@ -40,6 +46,46 @@ jobs:
             "$hash  geminUp.zip`n",
             [Text.Encoding]::ASCII)
 
+      - name: Build and verify signed Android APK
+        shell: powershell
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          GEMINUP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          GEMINUP_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          GEMINUP_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          $keystore = Join-Path $env:RUNNER_TEMP 'geminUp-release.jks'
+          [IO.File]::WriteAllBytes($keystore, [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
+          $env:GEMINUP_KEYSTORE_PATH = $keystore
+          Push-Location android
+          try {
+            .\gradlew.bat --no-daemon clean :app:assembleRelease
+            if ($LASTEXITCODE -ne 0) { throw 'Android release build failed.' }
+          }
+          finally {
+            Pop-Location
+          }
+          $apk = 'android\app\build\outputs\apk\release\app-release.apk'
+          $apksigner = Get-ChildItem "$env:ANDROID_HOME\build-tools" -Filter apksigner.bat -Recurse |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          $aapt = Get-ChildItem "$env:ANDROID_HOME\build-tools" -Filter aapt.exe -Recurse |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if ($null -eq $apksigner -or $null -eq $aapt) { throw 'Android verification tools are missing.' }
+          & $apksigner.FullName verify --verbose --print-certs $apk
+          if ($LASTEXITCODE -ne 0) { throw 'Signed APK verification failed.' }
+          $badging = & $aapt.FullName dump badging $apk
+          if ($badging -notmatch "package: name='io.github.rasfsaf.geminup'" -or
+              $badging -match 'application-debuggable') {
+            throw 'Android release has unexpected package metadata.'
+          }
+          Copy-Item $apk artifacts\geminUp.apk
+          $hash = (Get-FileHash artifacts\geminUp.apk -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText(
+            (Join-Path $PWD 'artifacts\geminUp.apk.sha256'),
+            "$hash  geminUp.apk`n",
+            [Text.Encoding]::ASCII)
+          Remove-Item -LiteralPath $keystore -Force
+
       - name: Publish GitHub release
         shell: powershell
         env:
@@ -48,7 +94,10 @@ jobs:
           gh release create "${{ github.ref_name }}" `
             artifacts\geminUp.zip `
             artifacts\geminUp.zip.sha256 `
+            artifacts\geminUp.apk `
+            artifacts\geminUp.apk.sha256 `
             geminUp-bootstrap.bat `
+            android\signing-certificate.pem `
             --verify-tag `
             --generate-notes `
             --title "geminUp ${{ github.ref_name }}"

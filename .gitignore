@@ -17,6 +17,14 @@ artifacts/
 __pycache__/
 *.py[cod]
 
+# Android build and machine-local files
+android/.gradle/
+android/**/build/
+android/local.properties
+android/*.jks
+android/*.keystore
+android/*.apk
+
 # Editors and OS
 .idea/
 .vscode/

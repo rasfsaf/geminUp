@@ -65,6 +65,7 @@ namespace GeminUp
             "myaccount.google.com",
             "www.google.com",
             "antigravity.google",
+            "antigravity.google.com",
             "*.antigravity.google",
             "cloudcode-pa.googleapis.com",
             "daily-cloudcode-pa.googleapis.com",
@@ -580,6 +581,105 @@ namespace GeminUp
         }
     }
 
+    internal static class AntigravityLauncher
+    {
+        private static readonly string[] ProxyVariables = new[]
+        {
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "GRPC_PROXY",
+            "http_proxy", "https_proxy", "all_proxy", "grpc_proxy"
+        };
+
+        public static int Launch(string configPath, string targetPath, string encodedArguments)
+        {
+            if (string.IsNullOrWhiteSpace(targetPath))
+                throw new ArgumentException("Antigravity target path is empty.");
+            string fullTarget = Path.GetFullPath(targetPath);
+            if (!File.Exists(fullTarget))
+                throw new FileNotFoundException("Antigravity executable does not exist.", fullTarget);
+            if (!string.Equals(Path.GetFileName(fullTarget), "Antigravity.exe", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Launcher target must be Antigravity.exe.");
+            if (string.Equals(fullTarget, Process.GetCurrentProcess().MainModule.FileName, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Launcher cannot target itself.");
+
+            TransportConfig config = ConfigStore.LoadConfig(configPath);
+            EnsureLocalTransport(config.ListenPort);
+            string proxyUrl = "http://127.0.0.1:" + config.ListenPort.ToString(CultureInfo.InvariantCulture);
+            string originalArguments = DecodeArguments(encodedArguments);
+
+            ProcessStartInfo start = new ProcessStartInfo
+            {
+                FileName = fullTarget,
+                WorkingDirectory = Path.GetDirectoryName(fullTarget),
+                UseShellExecute = false,
+                Arguments = JoinArguments(originalArguments,
+                    "--proxy-server=" + proxyUrl + " --disable-quic")
+            };
+            foreach (string variable in ProxyVariables)
+                start.EnvironmentVariables[variable] = proxyUrl;
+            AppendNoProxy(start, "NO_PROXY");
+            AppendNoProxy(start, "no_proxy");
+            start.EnvironmentVariables["GEMINUP_ANTIGRAVITY"] = "1";
+
+            Process process = Process.Start(start);
+            if (process == null) throw new InvalidOperationException("Windows did not start Antigravity.");
+            return 0;
+        }
+
+        private static void EnsureLocalTransport(int port)
+        {
+            using (TcpClient client = new TcpClient())
+            {
+                IAsyncResult result = client.BeginConnect(IPAddress.Loopback, port, null, null);
+                try
+                {
+                    if (!result.AsyncWaitHandle.WaitOne(2000))
+                        throw new IOException("geminUp local transport is not running on 127.0.0.1:" +
+                            port.ToString(CultureInfo.InvariantCulture) + ".");
+                    client.EndConnect(result);
+                }
+                finally
+                {
+                    result.AsyncWaitHandle.Close();
+                }
+            }
+        }
+
+        private static string DecodeArguments(string encodedArguments)
+        {
+            if (string.IsNullOrWhiteSpace(encodedArguments)) return string.Empty;
+            byte[] bytes = Convert.FromBase64String(encodedArguments);
+            try
+            {
+                if (bytes.Length > 32768) throw new ArgumentException("Antigravity shortcut arguments are too long.");
+                return new UTF8Encoding(false, true).GetString(bytes);
+            }
+            finally
+            {
+                Array.Clear(bytes, 0, bytes.Length);
+            }
+        }
+
+        private static string JoinArguments(string first, string second)
+        {
+            if (string.IsNullOrWhiteSpace(first)) return second;
+            return first.Trim() + " " + second;
+        }
+
+        private static void AppendNoProxy(ProcessStartInfo start, string name)
+        {
+            string current = start.EnvironmentVariables[name] ?? string.Empty;
+            List<string> entries = current.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(value => value.Trim())
+                .Where(value => value.Length > 0)
+                .ToList();
+            foreach (string local in new[] { "localhost", "127.0.0.1", "::1" })
+            {
+                if (!entries.Contains(local, StringComparer.OrdinalIgnoreCase)) entries.Add(local);
+            }
+            start.EnvironmentVariables[name] = string.Join(",", entries.ToArray());
+        }
+    }
+
     internal static class Program
     {
         private static int Main(string[] args)
@@ -593,6 +693,9 @@ namespace GeminUp
                 string configPath = GetOption(args, "--config", true);
                 if (command == "configure") return Configure(configPath, GetOption(args, "--domains", false));
                 if (command == "test") return Test(configPath);
+                if (command == "launch-antigravity")
+                    return AntigravityLauncher.Launch(configPath, GetOption(args, "--target", true),
+                        GetOption(args, "--original-arguments", false));
                 if (command == "run")
                 {
                     string pidPath = GetOption(args, "--pid", true);
@@ -688,6 +791,7 @@ namespace GeminUp
             Console.Error.WriteLine("Usage: geminUp.exe configure --config PATH [--domains PATH]");
             Console.Error.WriteLine("       geminUp.exe test --config PATH");
             Console.Error.WriteLine("       geminUp.exe run --config PATH --pid PATH --log PATH");
+            Console.Error.WriteLine("       geminUp.exe launch-antigravity --config PATH --target PATH [--original-arguments BASE64]");
             return 2;
         }
     }

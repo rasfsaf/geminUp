@@ -1,8 +1,13 @@
 # geminUp
 
-`geminUp` — машинный транспорт для Windows 10/11, который направляет сетевые зависимости Google Gemini и Antigravity через пользовательский SOCKS5-прокси. Остальной трафик продолжает идти по обычной таблице маршрутизации Windows, включая уже подключённый VPN.
+`geminUp` — открытый проект для доступа к Google Gemini через пользовательский SOCKS5-прокси.
 
-Это не VPN-клиент, не браузер, не Gemini-клиент и не API-обёртка.
+В проект входят два разных компонента:
+
+- Windows 10/11: машинный транспорт для Gemini и Antigravity, работающий с обычными браузерами и приложениями;
+- Android 7+: отдельный WebView-клиент Gemini с собственным локальным HTTP→SOCKS5-мостом.
+
+Android-приложение не является VPN и не перехватывает трафик других приложений. Пользователь может одновременно сохранить системный VPN и отдельно направить встроенный Gemini через SOCKS5.
 
 ## Возможности
 
@@ -20,6 +25,17 @@
 - fallback установки официального .NET Framework 4.8 при отсутствии компилятора.
 
 ## Быстрый запуск
+
+### Android
+
+1. Скачай единственный `geminUp.apk` со страницы [Releases](https://github.com/rasfsaf/geminUp/releases).
+2. При желании сверь `geminUp.apk.sha256` и [сертификат подписи](android/signing-certificate.pem).
+3. Разреши установку APK из выбранного браузера или файлового менеджера.
+4. Открой geminUp, нажми `+`, введи SOCKS5 и включи его.
+
+Публичный package ID: `io.github.rasfsaf.geminup`. APK подписан постоянным release-ключом проекта. Ранняя debug-сборка `com.gemini.fulldostup` не обновляется поверх release-версии: её нужно один раз удалить.
+
+Приложение запрашивает только `INTERNET` и `ACCESS_NETWORK_STATE`. Доступ к реальной геолокации не запрашивается.
 
 ### Полный архив — рекомендуемый способ
 
@@ -58,15 +74,16 @@ socks5://username:password@host:port
 
 Если логин или пароль содержит двоеточие либо специальные символы, используй URL-форму с percent-encoding.
 
-После зелёного `SUCCESSFUL` полностью перезапусти открытые браузеры, чтобы оборвать старые Google-соединения.
+После зелёного `SUCCESSFUL` полностью перезапусти открытые браузеры и Antigravity, чтобы оборвать старые прямые соединения.
 
-## Как устроена маршрутизация
+## Как устроена маршрутизация Windows
 
 Windows направляет proxy-aware приложения на локальный HTTP/CONNECT transport `127.0.0.1:8877`.
 
 ```mermaid
 flowchart LR
-    A["Браузер или Antigravity"] --> B["geminUp 127.0.0.1:8877"]
+    A["Браузер через Windows proxy"] --> B["geminUp 127.0.0.1:8877"]
+    AG["Antigravity launcher"] --> B
     B -->|"Gemini / Antigravity hostname"| C["SOCKS5 + удалённый DNS"]
     B -->|"Остальной hostname"| D["Текущий Windows route / VPN"]
     C --> E["Google Gemini"]
@@ -80,8 +97,19 @@ flowchart LR
 
 - Chrome, Edge и Brave используют машинный Windows proxy; политики отключают QUIC и непроксированный WebRTC UDP.
 - Firefox получает машинные enterprise policies: системный proxy и отключённый WebRTC.
-- Chromium/Electron-приложения, включая Antigravity, обычно наследуют системный proxy.
+- Antigravity запускается через изменённые ярлыки. Только его процесс и дочерние `language_server.exe`, `node.exe` и sidecar получают локальные proxy-переменные; глобальные environment variables не создаются.
+- Прямой запуск оригинального `Antigravity.exe` в обход управляемого ярлыка не поддерживается и обходит process-scoped настройку.
 - Приложения с собственным proxy, `--no-proxy-server`, встроенным VPN или игнорированием WinINET не поддерживаются.
+
+## Как устроен Android-клиент
+
+Android-приложение открывает `gemini.google.com` только во встроенном WebView. Внутри процесса поднимается loopback HTTP proxy на случайном порту `127.0.0.1`, который преобразует запросы WebView в SOCKS5 с удалённым разрешением DNS.
+
+Системный VPN Android при этом не выключается и не заменяется. Другие приложения, браузеры и системный трафик через geminUp не проходят.
+
+Приложение подменяет доступную странице геолокацию, locale и timezone на значения Великобритании, но не получает реальную геолокацию устройства. Настройки SOCKS5 и их история шифруются ключом из Android Keystore и остаются на устройстве.
+
+Подробнее: [политика конфиденциальности](PRIVACY.md).
 
 ## Автозапуск и хранение
 
@@ -125,6 +153,8 @@ Windows PowerShell автоматически не восстанавливае�
 
 `geminUp` защищает сетевой маршрут. Он не подменяет геолокацию браузера, часовой пояс, SIM, историю аккаунта, cookies или fingerprint. Качество и география SOCKS5 остаются ответственностью пользователя.
 
+Android-клиент поддерживает Android 7.0 (API 24) и новее при наличии системного WebView с поддержкой `PROXY_OVERRIDE`. Он работает только со встроенным Gemini и не обещает маршрутизацию других Android-приложений.
+
 ## Разработка и тесты
 
 Runtime-файлы:
@@ -134,6 +164,8 @@ geminUp.bat
 geminUp.ps1
 transport/GeminUp.cs
 transport/domains.txt
+geminUp.apk
+android/
 ```
 
 Python нужен только интеграционному тесту и не нужен пользователям:
@@ -142,7 +174,16 @@ Python нужен только интеграционному тесту и не
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-GeminUp.ps1
 ```
 
-Тест компилирует ядро, поднимает loopback SOCKS5, проверяет direct-route, Gemini-route, Antigravity-route и fail-closed. Он не меняет системный proxy, registry или Scheduled Tasks.
+Тест компилирует ядро, поднимает loopback SOCKS5, проверяет direct-route, Gemini-route, endpoint языка Antigravity, наследование proxy только дочерним процессом launcher и fail-closed. Он не меняет реальные ярлыки, системный proxy, registry или Scheduled Tasks.
+
+Android собирается фиксированным Gradle Wrapper без системного Gradle:
+
+```powershell
+cd android
+.\gradlew.bat :app:assembleRelease
+```
+
+Без release-keystore получится неподписанный результат для проверки компиляции. Подписанный `geminUp.apk` создаёт release workflow из зашифрованных GitHub Actions Secrets. Приватный ключ и пароли никогда не хранятся в репозитории.
 
 ## Лицензия
 

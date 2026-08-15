@@ -150,6 +150,38 @@ try {
         throw 'C# compilation failed.'
     }
 
+    $probeSource = Join-Path $resolvedTestRoot 'AntigravityProbe.cs'
+    $probeExecutable = Join-Path $resolvedTestRoot 'Antigravity.exe'
+    $probeCode = @'
+using System;
+using System.IO;
+using System.Text;
+
+internal static class AntigravityProbe
+{
+    private static int Main(string[] args)
+    {
+        if (args.Length == 0) return 2;
+        string[] names = new[]
+        {
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "GRPC_PROXY",
+            "NO_PROXY", "GEMINUP_ANTIGRAVITY"
+        };
+        StringBuilder output = new StringBuilder();
+        foreach (string name in names)
+            output.AppendLine(name + "=" + (Environment.GetEnvironmentVariable(name) ?? string.Empty));
+        output.AppendLine("ARGS=" + string.Join(" ", args));
+        File.WriteAllText(args[0], output.ToString(), new UTF8Encoding(false));
+        return 0;
+    }
+}
+'@
+    [IO.File]::WriteAllText($probeSource, $probeCode, [Text.UTF8Encoding]::new($false))
+    & $compiler /nologo /target:exe /optimize+ /platform:anycpu "/out:$probeExecutable" $probeSource
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $probeExecutable)) {
+        throw 'Antigravity launcher probe compilation failed.'
+    }
+
     $python = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($null -eq $python) {
         $python = Get-Command python -ErrorAction SilentlyContinue
@@ -192,6 +224,7 @@ try {
     $direct = Invoke-CurlCheck -Uri 'https://example.com/' -ProxyPort $transportPort
     $gemini = Invoke-CurlCheck -Uri 'https://gemini.google.com/' -ProxyPort $transportPort
     Invoke-ConnectProbe -HostName 'antigravity.google' -ProxyPort $transportPort
+    Invoke-ConnectProbe -HostName 'daily-cloudcode-pa.googleapis.com' -ProxyPort $transportPort
     if ($direct.ExitCode -ne 0 -or $direct.Code -ne '200') {
         throw "Direct route failed: curl=$($direct.ExitCode), HTTP=$($direct.Code), error=$($direct.Error)."
     }
@@ -202,7 +235,8 @@ try {
     do {
         $routes = @(Get-Content -LiteralPath $socksStdout -Encoding UTF8 -ErrorAction SilentlyContinue)
         if (($routes -match '^CONNECT gemini\.google\.com:443$') -and
-            ($routes -match '^CONNECT antigravity\.google:443$')) {
+            ($routes -match '^CONNECT antigravity\.google:443$') -and
+            ($routes -match '^CONNECT daily-cloudcode-pa\.googleapis\.com:443$')) {
             break
         }
         Start-Sleep -Milliseconds 100
@@ -214,6 +248,50 @@ try {
     if (-not ($routes -match '^CONNECT antigravity\.google:443$')) {
         $transportOutput = @(Get-Content -LiteralPath $transportLog -Encoding UTF8 -ErrorAction SilentlyContinue)
         throw "Antigravity did not enter SOCKS route. Routes: $($routes -join '; '). Transport log: $($transportOutput -join '; ')"
+    }
+    if (-not ($routes -match '^CONNECT daily-cloudcode-pa\.googleapis\.com:443$')) {
+        throw "Antigravity language-server endpoint did not enter SOCKS route. Routes: $($routes -join '; ')"
+    }
+
+    $probeOutput = Join-Path $resolvedTestRoot 'antigravity-launcher-probe.txt'
+    $originalArguments = '"{0}" --original-flag' -f $probeOutput.Replace('"', '\"')
+    $argumentBytes = [Text.UTF8Encoding]::new($false).GetBytes($originalArguments)
+    try {
+        $encodedArguments = [Convert]::ToBase64String($argumentBytes)
+    }
+    finally {
+        [Array]::Clear($argumentBytes, 0, $argumentBytes.Length)
+    }
+    $parentHttpProxy = $env:HTTP_PROXY
+    & $executable launch-antigravity --config $configPath --target $probeExecutable `
+        --original-arguments $encodedArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Antigravity launcher exited with code $LASTEXITCODE."
+    }
+    $probeDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not (Test-Path -LiteralPath $probeOutput) -and [DateTime]::UtcNow -lt $probeDeadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not (Test-Path -LiteralPath $probeOutput)) {
+        throw 'Antigravity launcher probe did not produce output.'
+    }
+    $probeText = Get-Content -LiteralPath $probeOutput -Raw -Encoding UTF8
+    $expectedLocalProxy = "http://127.0.0.1:$transportPort"
+    foreach ($name in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'GRPC_PROXY')) {
+        if ($probeText -notmatch "(?m)^${name}=$([regex]::Escape($expectedLocalProxy))\r?$") {
+            throw "Antigravity child environment is missing ${name}=${expectedLocalProxy}. Probe: $probeText"
+        }
+    }
+    if ($probeText -notmatch '(?m)^NO_PROXY=.*(?:localhost|127\.0\.0\.1)') {
+        throw "Antigravity child NO_PROXY does not protect loopback. Probe: $probeText"
+    }
+    if ($probeText -notmatch '(?m)^GEMINUP_ANTIGRAVITY=1\r?$' -or
+        $probeText -notmatch "--proxy-server=$([regex]::Escape($expectedLocalProxy))" -or
+        $probeText -notmatch '--disable-quic' -or $probeText -notmatch '--original-flag') {
+        throw "Antigravity launcher flags are incomplete. Probe: $probeText"
+    }
+    if ($env:HTTP_PROXY -ne $parentHttpProxy) {
+        throw 'Antigravity launcher modified the parent/global HTTP_PROXY value.'
     }
 
     Stop-Process -Id $socksProcess.Id -Force
@@ -230,7 +308,7 @@ try {
         throw "Gemini did not fail closed when SOCKS5 went offline: curl=$($geminiOffline.ExitCode), HTTP=$($geminiOffline.Code)."
     }
 
-    Write-Host 'SUCCESS: compile, routing and fail-closed integration checks passed.' -ForegroundColor Green
+    Write-Host 'SUCCESS: compile, routing, process-scoped Antigravity launcher and fail-closed checks passed.' -ForegroundColor Green
 }
 finally {
     if ($null -ne $transportProcess -and -not $transportProcess.HasExited) {

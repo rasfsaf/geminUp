@@ -7,7 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TransportVersion = '1.1.0'
+$script:TransportVersion = '1.2.0'
 $script:TaskName = 'geminUp'
 $script:ListenPort = 8877
 $script:InstallRoot = Join-Path $env:ProgramData 'geminUp'
@@ -197,6 +197,8 @@ function Build-TransportExecutable {
         throw "C# compiler failed with exit code $LASTEXITCODE."
     }
     if (Test-Path -LiteralPath $script:ExecutablePath) {
+        Unregister-TransportTask
+        Stop-TransportProcess
         Remove-Item -LiteralPath $script:ExecutablePath -Force
     }
     Move-Item -LiteralPath $temporaryExe -Destination $script:ExecutablePath
@@ -365,10 +367,12 @@ function New-TransportState {
     $policyBackups += Get-RegistryValueBackup -Path $script:FirefoxPolicyPath -Name 'Preferences'
 
     return [PSCustomObject]@{
-        Version = 2
+        Version = 3
         InstalledAtUtc = [DateTime]::UtcNow.ToString('o')
         RegistryBackups = $registryBackups
         PolicyBackups = $policyBackups
+        ShortcutOwnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        AntigravityShortcutBackups = @()
     }
 }
 
@@ -440,6 +444,209 @@ function Restore-SystemProxyAndPolicies {
     }
     Notify-InternetSettingsChanged
     Write-TransportLog OK 'Previous machine proxy and browser policy settings restored.'
+}
+
+function Get-AntigravityExecutablePath {
+    $candidates = @()
+    $running = Get-CimInstance Win32_Process -Filter "Name='Antigravity.exe'" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $running -and -not [string]::IsNullOrWhiteSpace($running.ExecutablePath)) {
+        $candidates += [string]$running.ExecutablePath
+    }
+    $candidates += Join-Path $env:LOCALAPPDATA 'Programs\antigravity\Antigravity.exe'
+
+    foreach ($candidate in @($candidates | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            continue
+        }
+        $file = Get-Item -LiteralPath $candidate
+        if ($file.Name -ne 'Antigravity.exe' -or $file.VersionInfo.CompanyName -ne 'Google') {
+            Write-TransportLog WARN "Ignoring unexpected Antigravity candidate: $candidate"
+            continue
+        }
+        return $file.FullName
+    }
+    return $null
+}
+
+function Get-AntigravityShortcutBackups {
+    param([string]$AntigravityPath)
+
+    $roots = @(
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory),
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::StartMenu),
+        (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar')
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) } |
+        Select-Object -Unique
+
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $backups = @()
+        foreach ($shortcutPath in @($roots | ForEach-Object {
+                    Get-ChildItem -LiteralPath $_ -Filter '*.lnk' -File -Recurse -ErrorAction SilentlyContinue
+                } | Select-Object -ExpandProperty FullName -Unique)) {
+            $shortcut = $shell.CreateShortcut($shortcutPath)
+            if (-not [string]::Equals($shortcut.TargetPath, $AntigravityPath,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            $backups += [PSCustomObject]@{
+                Path = $shortcutPath
+                Exists = $true
+                TargetPath = [string]$shortcut.TargetPath
+                Arguments = [string]$shortcut.Arguments
+                WorkingDirectory = [string]$shortcut.WorkingDirectory
+                IconLocation = [string]$shortcut.IconLocation
+                Description = [string]$shortcut.Description
+                WindowStyle = [int]$shortcut.WindowStyle
+                Hotkey = [string]$shortcut.Hotkey
+            }
+        }
+
+        if ($backups.Count -eq 0) {
+            $programs = [Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)
+            if ([string]::IsNullOrWhiteSpace($programs)) {
+                throw 'Cannot locate the current user Start Menu Programs directory.'
+            }
+            $backups += [PSCustomObject]@{
+                Path = Join-Path $programs 'Antigravity (geminUp).lnk'
+                Exists = $false
+                TargetPath = $AntigravityPath
+                Arguments = ''
+                WorkingDirectory = Split-Path -Parent $AntigravityPath
+                IconLocation = "$AntigravityPath,0"
+                Description = 'Google Antigravity through geminUp'
+                WindowStyle = 1
+                Hotkey = ''
+            }
+        }
+        return $backups
+    }
+    finally {
+        if ($null -ne $shell) {
+            [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
+        }
+    }
+}
+
+function Set-AntigravityShortcutRouting {
+    param([object]$State)
+
+    $antigravityPath = Get-AntigravityExecutablePath
+    if ([string]::IsNullOrWhiteSpace($antigravityPath)) {
+        Write-TransportLog WARN 'Antigravity is not installed for the current user; no Antigravity shortcut was changed.'
+        return
+    }
+
+    $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if (-not ($State.PSObject.Properties.Name -contains 'ShortcutOwnerSid')) {
+        $State | Add-Member -NotePropertyName ShortcutOwnerSid -NotePropertyValue $ownerSid
+    }
+    if (-not [string]::Equals([string]$State.ShortcutOwnerSid, $ownerSid, [StringComparison]::Ordinal)) {
+        throw 'Antigravity shortcut state belongs to another Windows user.'
+    }
+    if (-not ($State.PSObject.Properties.Name -contains 'AntigravityShortcutBackups') -or
+        @($State.AntigravityShortcutBackups).Count -eq 0) {
+        $backups = @(Get-AntigravityShortcutBackups -AntigravityPath $antigravityPath)
+        $State | Add-Member -NotePropertyName AntigravityShortcutBackups -NotePropertyValue $backups -Force
+        $State.Version = 3
+        Save-JsonFile -Path $script:StatePath -Value $State
+    }
+
+    $shell = New-Object -ComObject WScript.Shell
+    $changed = @()
+    try {
+        foreach ($backup in @($State.AntigravityShortcutBackups)) {
+            $shortcutDirectory = Split-Path -Parent ([string]$backup.Path)
+            if (-not (Test-Path -LiteralPath $shortcutDirectory)) {
+                New-Item -ItemType Directory -Path $shortcutDirectory -Force | Out-Null
+            }
+            $argumentBytes = [Text.UTF8Encoding]::new($false).GetBytes([string]$backup.Arguments)
+            try {
+                $encodedArguments = [Convert]::ToBase64String($argumentBytes)
+            }
+            finally {
+                [Array]::Clear($argumentBytes, 0, $argumentBytes.Length)
+            }
+            $shortcut = $shell.CreateShortcut([string]$backup.Path)
+            $shortcut.TargetPath = $script:ExecutablePath
+            $shortcut.Arguments = 'launch-antigravity --config "{0}" --target "{1}" --original-arguments "{2}"' -f `
+                $script:ConfigPath.Replace('"', '\"'), ([string]$backup.TargetPath).Replace('"', '\"'), $encodedArguments
+            $shortcut.WorkingDirectory = Split-Path -Parent ([string]$backup.TargetPath)
+            $shortcut.IconLocation = if ([string]::IsNullOrWhiteSpace([string]$backup.IconLocation)) {
+                "{0},0" -f [string]$backup.TargetPath
+            } else { [string]$backup.IconLocation }
+            $shortcut.Description = 'Google Antigravity through geminUp'
+            $shortcut.WindowStyle = [int]$backup.WindowStyle
+            if (-not [string]::IsNullOrWhiteSpace([string]$backup.Hotkey)) {
+                $shortcut.Hotkey = [string]$backup.Hotkey
+            }
+            $shortcut.Save()
+            $changed += [string]$backup.Path
+        }
+    }
+    catch {
+        Restore-AntigravityShortcuts -State $State -Paths $changed
+        throw "Cannot configure Antigravity shortcuts: $($_.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $shell) {
+            [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
+        }
+    }
+    Write-TransportLog OK "Antigravity launcher configured for $($changed.Count) shortcut(s); only its process tree receives proxy variables."
+}
+
+function Restore-AntigravityShortcuts {
+    param(
+        [object]$State,
+        [string[]]$Paths = @()
+    )
+
+    if (-not ($State.PSObject.Properties.Name -contains 'AntigravityShortcutBackups')) {
+        return
+    }
+    $pathFilter = @($Paths)
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        foreach ($backup in @($State.AntigravityShortcutBackups)) {
+            if ($pathFilter.Count -gt 0 -and $pathFilter -notcontains [string]$backup.Path) {
+                continue
+            }
+            if (-not [bool]$backup.Exists) {
+                if (Test-Path -LiteralPath ([string]$backup.Path)) {
+                    $current = $shell.CreateShortcut([string]$backup.Path)
+                    if ([string]::Equals($current.TargetPath, $script:ExecutablePath,
+                            [StringComparison]::OrdinalIgnoreCase)) {
+                        Remove-Item -LiteralPath ([string]$backup.Path) -Force
+                    }
+                }
+                continue
+            }
+            if (Test-Path -LiteralPath ([string]$backup.Path)) {
+                $current = $shell.CreateShortcut([string]$backup.Path)
+                if (-not [string]::Equals($current.TargetPath, $script:ExecutablePath,
+                        [StringComparison]::OrdinalIgnoreCase)) {
+                    Write-TransportLog WARN "Shortcut changed after geminUp setup; leaving it untouched: $($backup.Path)"
+                    continue
+                }
+            }
+            $shortcut = $shell.CreateShortcut([string]$backup.Path)
+            $shortcut.TargetPath = [string]$backup.TargetPath
+            $shortcut.Arguments = [string]$backup.Arguments
+            $shortcut.WorkingDirectory = [string]$backup.WorkingDirectory
+            $shortcut.IconLocation = [string]$backup.IconLocation
+            $shortcut.Description = [string]$backup.Description
+            $shortcut.WindowStyle = [int]$backup.WindowStyle
+            $shortcut.Hotkey = [string]$backup.Hotkey
+            $shortcut.Save()
+        }
+    }
+    finally {
+        if ($null -ne $shell) {
+            [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
+        }
+    }
 }
 
 function Stop-TransportProcess {
@@ -596,6 +803,12 @@ function Show-TransportStatus {
     Write-Host ('  SOCKS stored:  {0}' -f $configured)
     Write-Host ('  Process:       {0}' -f $(if ($null -ne $process) { "running (PID $($process.Id))" } else { 'stopped' }))
     Write-Host ('  Machine proxy: {0} {1}' -f $proxyEnabled, $proxyServer)
+    $state = Read-JsonFile -Path $script:StatePath
+    $shortcutCount = if ($null -ne $state -and
+        $state.PSObject.Properties.Name -contains 'AntigravityShortcutBackups') {
+        @($state.AntigravityShortcutBackups).Count
+    } else { 0 }
+    Write-Host ('  Antigravity:   {0}' -f $(if ($shortcutCount -gt 0) { "$shortcutCount managed shortcut(s)" } else { 'not process-routed' }))
     $task = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
     Write-Host ('  Autostart:     {0}' -f ($null -ne $task))
 }
@@ -603,11 +816,10 @@ function Show-TransportStatus {
 function Enable-Transport {
     Assert-SupportedWindows
     Assert-Administrator
-    Build-TransportExecutable
-
     $hadConfig = Test-Path -LiteralPath $script:ConfigPath
     $oldConfigBytes = if ($hadConfig) { [IO.File]::ReadAllBytes($script:ConfigPath) } else { $null }
     try {
+        Build-TransportExecutable
         Invoke-SecureProxyConfiguration
         $state = Read-JsonFile -Path $script:StatePath
         if ($null -eq $state) {
@@ -618,11 +830,12 @@ function Enable-Transport {
         Register-TransportTask
         Start-TransportProcess
         Test-LocalTransport
+        Set-AntigravityShortcutRouting -State $state
         Write-Host ''
         Write-Host '========================================' -ForegroundColor Green
         Write-Host '  SUCCESSFUL: geminUp is enabled' -ForegroundColor Green
         Write-Host '========================================' -ForegroundColor Green
-        Write-TransportLog OK 'Restart open browsers once to drop old Google connections.'
+        Write-TransportLog OK 'Restart open browsers and fully exit/reopen Antigravity to drop old direct connections.'
     }
     catch {
         $failure = $_.Exception.Message
@@ -662,6 +875,7 @@ function Disable-Transport {
     Unregister-TransportTask
     $state = Read-JsonFile -Path $script:StatePath
     if ($null -ne $state) {
+        Restore-AntigravityShortcuts -State $state
         Restore-SystemProxyAndPolicies -State $state
         Remove-Item -LiteralPath $script:StatePath -Force
     }
