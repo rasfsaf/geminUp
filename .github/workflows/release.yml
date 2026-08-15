@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Test
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-GeminUp.ps1
+
+      - name: Build release ZIP and checksum
+        shell: powershell
+        run: |
+          $stage = Join-Path $PWD 'artifacts\geminUp'
+          New-Item -ItemType Directory -Path (Join-Path $stage 'transport') -Force | Out-Null
+          Copy-Item geminUp.bat,geminUp-bootstrap.bat,geminUp.ps1,README.md,SECURITY.md,LICENSE -Destination $stage
+          Copy-Item transport\GeminUp.cs,transport\domains.txt -Destination (Join-Path $stage 'transport')
+          Compress-Archive -Path $stage -DestinationPath artifacts\geminUp.zip -CompressionLevel Optimal
+          $hash = (Get-FileHash artifacts\geminUp.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText(
+            (Join-Path $PWD 'artifacts\geminUp.zip.sha256'),
+            "$hash  geminUp.zip`n",
+            [Text.Encoding]::ASCII)
+
+      - name: Publish GitHub release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            artifacts\geminUp.zip `
+            artifacts\geminUp.zip.sha256 `
+            geminUp-bootstrap.bat `
+            --verify-tag `
+            --generate-notes `
+            --title "geminUp ${{ github.ref_name }}"

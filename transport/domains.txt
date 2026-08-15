@@ -1,0 +1,33 @@
+# Gemini web and public AI surfaces
+gemini.google.com
+aistudio.google.com
+ai.google.dev
+makersuite.google.com
+bard.google.com
+
+# Google authentication used by Gemini
+accounts.google.*
+consent.google.com
+myaccount.google.com
+oauth2.googleapis.com
+
+# Gemini frontend RPC and uploads
+push.clients6.google.com
+alkalimakersuite-pa.clients6.google.com
+generativelanguage.googleapis.com
+*.googleusercontent.com
+usercontent.google.com
+
+# Shared static/runtime dependencies loaded by Gemini
+*.gstatic.com
+apis.google.com
+ogs.google.com
+www.google.com
+
+# Antigravity / Cloud Code Gemini transport
+antigravity.google
+*.antigravity.google
+cloudcode-pa.googleapis.com
+daily-cloudcode-pa.googleapis.com
+*.cloudcode-pa.googleapis.com
+www.googleapis.com

@@ -1,0 +1,32 @@
+name: Windows CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  integration:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run Windows integration tests
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-GeminUp.ps1
+
+      - name: Ensure runtime tree contains no generated files
+        shell: powershell
+        run: |
+          $generated = @(Get-ChildItem -Recurse -File -Include *.exe,*.pdb,*.pyc)
+          if ($generated.Count) {
+            $generated.FullName | Write-Error
+            exit 1
+          }

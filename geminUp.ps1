@@ -1,0 +1,714 @@
+[CmdletBinding()]
+param(
+    [ValidateSet('menu', 'enable', 'change', 'disable', 'status')]
+    [string]$Action = 'menu'
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$script:TransportVersion = '1.1.0'
+$script:TaskName = 'geminUp'
+$script:ListenPort = 8877
+$script:InstallRoot = Join-Path $env:ProgramData 'geminUp'
+$script:ExecutablePath = Join-Path $script:InstallRoot 'geminUp.exe'
+$script:ConfigPath = Join-Path $script:InstallRoot 'config.json'
+$script:StatePath = Join-Path $script:InstallRoot 'state.json'
+$script:PidPath = Join-Path $script:InstallRoot 'transport.pid'
+$script:LogPath = Join-Path $script:InstallRoot 'transport.log'
+$script:SourcePath = Join-Path $PSScriptRoot 'transport\GeminUp.cs'
+$script:DomainPath = Join-Path $PSScriptRoot 'transport\domains.txt'
+$script:InternetSettingsPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+$script:InternetSettingsPolicyPath = 'HKLM:\Software\Policies\Microsoft\Windows\CurrentVersion\Internet Settings'
+$script:FirefoxPolicyPath = 'HKLM:\Software\Policies\Mozilla\Firefox'
+$script:FirefoxProxyPolicyPath = Join-Path $script:FirefoxPolicyPath 'Proxy'
+$script:DotNet48InstallerUri = 'https://go.microsoft.com/fwlink/?linkid=2088631'
+
+function Write-TransportLog {
+    param(
+        [ValidateSet('INFO', 'OK', 'WARN', 'ERROR')]
+        [string]$Level,
+        [string]$Message
+    )
+
+    $color = switch ($Level) {
+        'OK' { 'Green' }
+        'WARN' { 'Yellow' }
+        'ERROR' { 'Red' }
+        default { 'Cyan' }
+    }
+    Write-Host ('[{0}] {1}' -f $Level, $Message) -ForegroundColor $color
+}
+
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Assert-Administrator {
+    if (-not (Test-IsAdministrator)) {
+        throw 'Run geminUp.bat and approve the administrator prompt.'
+    }
+}
+
+function Assert-SupportedWindows {
+    $version = [Environment]::OSVersion.Version
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or $version.Major -lt 10) {
+        throw 'geminUp supports standard desktop editions of Windows 10 and Windows 11 only.'
+    }
+}
+
+function Initialize-InstallDirectory {
+    if (-not (Test-Path -LiteralPath $script:InstallRoot)) {
+        New-Item -ItemType Directory -Path $script:InstallRoot -Force | Out-Null
+    }
+
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    foreach ($sidValue in @('S-1-5-18', 'S-1-5-32-544')) {
+        $sid = [Security.Principal.SecurityIdentifier]::new($sidValue)
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid, [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance, $propagation, [Security.AccessControl.AccessControlType]::Allow)
+        $security.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $script:InstallRoot -AclObject $security
+}
+
+function Save-JsonFile {
+    param(
+        [string]$Path,
+        [object]$Value
+    )
+
+    $directory = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    $json = $Value | ConvertTo-Json -Depth 10
+    Set-Content -LiteralPath $Path -Value $json -Encoding utf8
+}
+
+function Read-JsonFile {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+    try {
+        return Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json
+    }
+    catch {
+        throw "Cannot read '$Path': $($_.Exception.Message)"
+    }
+}
+
+function Find-CSharpCompiler {
+    $candidates = @(
+        (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
+        (Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+function Install-DotNetFramework48 {
+    Write-TransportLog WARN '.NET Framework 4.8 compiler is missing.'
+    $confirmation = Read-Host 'Download and install the official Microsoft .NET Framework 4.8 package? [y/N]'
+    if ($confirmation -notmatch '^(?i:y|yes)$') {
+        throw '.NET Framework installation was declined.'
+    }
+
+    $installerPath = Join-Path $env:TEMP 'geminUp-dotnet48-installer.exe'
+    try {
+        Write-TransportLog INFO 'Downloading .NET Framework 4.8 from Microsoft...'
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $script:DotNet48InstallerUri -OutFile $installerPath `
+            -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+        $signature = Get-AuthenticodeSignature -LiteralPath $installerPath
+        if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
+            $null -eq $signature.SignerCertificate -or
+            $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+            throw 'Downloaded .NET installer does not have a valid Microsoft digital signature.'
+        }
+
+        Write-TransportLog INFO 'Installing .NET Framework 4.8...'
+        $installer = Start-Process -FilePath $installerPath -ArgumentList '/q', '/norestart' `
+            -Wait -PassThru -WindowStyle Hidden
+        if ($installer.ExitCode -eq 3010) {
+            throw '.NET Framework 4.8 was installed. Restart Windows, then run geminUp.bat again.'
+        }
+        if ($installer.ExitCode -ne 0) {
+            throw ".NET Framework installer exited with code $($installer.ExitCode)."
+        }
+        Write-TransportLog OK '.NET Framework 4.8 installation completed.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $installerPath) {
+            Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-CSharpCompiler {
+    $compiler = Find-CSharpCompiler
+    if ($null -ne $compiler) {
+        return $compiler
+    }
+    Install-DotNetFramework48
+    $compiler = Find-CSharpCompiler
+    if ($null -eq $compiler) {
+        throw 'The .NET Framework compiler is still missing. Repair the Windows .NET Framework component and retry.'
+    }
+    return $compiler
+}
+
+function Build-TransportExecutable {
+    if (-not (Test-Path -LiteralPath $script:SourcePath)) {
+        throw "Transport source is missing: $script:SourcePath"
+    }
+    Initialize-InstallDirectory
+
+    $requiresBuild = -not (Test-Path -LiteralPath $script:ExecutablePath)
+    if (-not $requiresBuild) {
+        $requiresBuild = (Get-Item -LiteralPath $script:SourcePath).LastWriteTimeUtc -gt
+            (Get-Item -LiteralPath $script:ExecutablePath).LastWriteTimeUtc
+    }
+    if (-not $requiresBuild) {
+        return
+    }
+
+    $compiler = Get-CSharpCompiler
+    $temporaryExe = Join-Path $script:InstallRoot 'geminUp.build.exe'
+    if (Test-Path -LiteralPath $temporaryExe) {
+        Remove-Item -LiteralPath $temporaryExe -Force
+    }
+    Write-TransportLog INFO 'Building the self-contained Windows transport...'
+    & $compiler /nologo /target:exe /optimize+ /platform:anycpu "/out:$temporaryExe" `
+        /reference:System.Web.Extensions.dll /reference:System.Security.dll $script:SourcePath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $temporaryExe)) {
+        throw "C# compiler failed with exit code $LASTEXITCODE."
+    }
+    if (Test-Path -LiteralPath $script:ExecutablePath) {
+        Remove-Item -LiteralPath $script:ExecutablePath -Force
+    }
+    Move-Item -LiteralPath $temporaryExe -Destination $script:ExecutablePath
+    Write-TransportLog OK "Transport built: $script:ExecutablePath"
+}
+
+function Invoke-SecureProxyConfiguration {
+    $secureProxy = Read-Host 'SOCKS5 (host:port:user:password)' -AsSecureString
+    $pointer = [IntPtr]::Zero
+    $plainProxy = $null
+    $inputBytes = $null
+    try {
+        $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureProxy)
+        $plainProxy = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $script:ExecutablePath
+        $startInfo.Arguments = 'configure --config "{0}" --domains "{1}"' -f `
+            $script:ConfigPath.Replace('"', '\"'), $script:DomainPath.Replace('"', '\"')
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        if ($startInfo.PSObject.Properties.Name -contains 'StandardOutputEncoding') {
+            $startInfo.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+        }
+        if ($startInfo.PSObject.Properties.Name -contains 'StandardErrorEncoding') {
+            $startInfo.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+        }
+        $process = [Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) {
+            throw 'Cannot start the transport configurator.'
+        }
+        $inputBytes = [Text.UTF8Encoding]::new($false).GetBytes($plainProxy + "`n")
+        $process.StandardInput.BaseStream.Write($inputBytes, 0, $inputBytes.Length)
+        $process.StandardInput.BaseStream.Flush()
+        $process.StandardInput.Close()
+        $output = $process.StandardOutput.ReadToEnd()
+        $errorOutput = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            $message = if ([string]::IsNullOrWhiteSpace($errorOutput)) { 'Unknown SOCKS5 validation error.' } else { $errorOutput.Trim() }
+            if ($message.StartsWith('ERROR: ', [StringComparison]::OrdinalIgnoreCase)) {
+                $message = $message.Substring(7).Trim()
+            }
+            throw $message
+        }
+        Write-TransportLog OK $output.Trim()
+    }
+    finally {
+        $plainProxy = $null
+        if ($null -ne $inputBytes) {
+            [Array]::Clear($inputBytes, 0, $inputBytes.Length)
+        }
+        if ($pointer -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+        }
+    }
+}
+
+function Get-RegistryValueBackup {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return [PSCustomObject]@{ Path = $Path; Name = $Name; Exists = $false; Kind = ''; Value = $null }
+    }
+    $key = Get-Item -LiteralPath $Path
+    if ($key.GetValueNames() -notcontains $Name) {
+        return [PSCustomObject]@{ Path = $Path; Name = $Name; Exists = $false; Kind = ''; Value = $null }
+    }
+    return [PSCustomObject]@{
+        Path = $Path
+        Name = $Name
+        Exists = $true
+        Kind = $key.GetValueKind($Name).ToString()
+        Value = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    }
+}
+
+function Restore-RegistryValue {
+    param([object]$Backup)
+
+    if ($Backup.Exists) {
+        if (-not (Test-Path -LiteralPath $Backup.Path)) {
+            New-Item -Path $Backup.Path -Force | Out-Null
+        }
+        $propertyType = switch ([string]$Backup.Kind) {
+            'DWord' { 'DWord' }
+            'QWord' { 'QWord' }
+            'ExpandString' { 'ExpandString' }
+            'MultiString' { 'MultiString' }
+            'Binary' { 'Binary' }
+            default { 'String' }
+        }
+        New-ItemProperty -LiteralPath $Backup.Path -Name $Backup.Name -Value $Backup.Value `
+            -PropertyType $propertyType -Force | Out-Null
+    }
+    elseif (Test-Path -LiteralPath $Backup.Path) {
+        Remove-ItemProperty -LiteralPath $Backup.Path -Name $Backup.Name -ErrorAction SilentlyContinue
+    }
+}
+
+function Set-FirefoxMachinePolicies {
+    param([object]$PreferencesBackup)
+
+    foreach ($path in @($script:FirefoxPolicyPath, $script:FirefoxProxyPolicyPath)) {
+        if (-not (Test-Path -LiteralPath $path)) {
+            New-Item -Path $path -Force | Out-Null
+        }
+    }
+    New-ItemProperty -LiteralPath $script:FirefoxProxyPolicyPath -Name 'Mode' `
+        -Value 'system' -PropertyType String -Force | Out-Null
+    New-ItemProperty -LiteralPath $script:FirefoxProxyPolicyPath -Name 'Locked' `
+        -Value 1 -PropertyType DWord -Force | Out-Null
+
+    $preferences = [PSCustomObject]@{}
+    if ($PreferencesBackup.Exists) {
+        $raw = if ($PreferencesBackup.Value -is [array]) {
+            [string]::Join([Environment]::NewLine, [string[]]$PreferencesBackup.Value)
+        }
+        else {
+            [string]$PreferencesBackup.Value
+        }
+        try {
+            $preferences = $raw | ConvertFrom-Json
+            if ($null -eq $preferences) {
+                throw 'JSON value is empty.'
+            }
+        }
+        catch {
+            throw "Existing Firefox Preferences policy is not valid JSON: $($_.Exception.Message)"
+        }
+    }
+    $webrtcPolicy = [PSCustomObject]@{ Value = $false; Status = 'locked' }
+    $preferences | Add-Member -NotePropertyName 'media.peerconnection.enabled' `
+        -NotePropertyValue $webrtcPolicy -Force
+    $json = $preferences | ConvertTo-Json -Depth 20
+    New-ItemProperty -LiteralPath $script:FirefoxPolicyPath -Name 'Preferences' `
+        -Value ([string[]]($json -split "`r?`n")) -PropertyType MultiString -Force | Out-Null
+}
+
+function New-TransportState {
+    $registryBackups = @()
+    foreach ($name in @('ProxyEnable', 'ProxyServer', 'ProxyOverride', 'AutoConfigURL')) {
+        $registryBackups += Get-RegistryValueBackup -Path $script:InternetSettingsPath -Name $name
+    }
+    $registryBackups += Get-RegistryValueBackup -Path $script:InternetSettingsPolicyPath -Name 'ProxySettingsPerUser'
+
+    $policyBackups = @()
+    $policyPaths = @(
+        'HKLM:\Software\Policies\Google\Chrome',
+        'HKLM:\Software\Policies\Microsoft\Edge',
+        'HKLM:\Software\Policies\BraveSoftware\Brave'
+    )
+    foreach ($path in $policyPaths) {
+        foreach ($name in @('WebRtcIPHandlingPolicy', 'QuicAllowed')) {
+            $policyBackups += Get-RegistryValueBackup -Path $path -Name $name
+        }
+    }
+    $policyBackups += Get-RegistryValueBackup -Path $script:FirefoxProxyPolicyPath -Name 'Mode'
+    $policyBackups += Get-RegistryValueBackup -Path $script:FirefoxProxyPolicyPath -Name 'Locked'
+    $policyBackups += Get-RegistryValueBackup -Path $script:FirefoxPolicyPath -Name 'Preferences'
+
+    return [PSCustomObject]@{
+        Version = 2
+        InstalledAtUtc = [DateTime]::UtcNow.ToString('o')
+        RegistryBackups = $registryBackups
+        PolicyBackups = $policyBackups
+    }
+}
+
+function Notify-InternetSettingsChanged {
+    if (-not ('GeminUp.NativeMethods' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace GeminUp {
+    public static class NativeMethods {
+        [DllImport("wininet.dll", SetLastError=true)]
+        public static extern bool InternetSetOption(IntPtr hInternet, int option, IntPtr buffer, int length);
+    }
+}
+"@
+    }
+    [GeminUp.NativeMethods]::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0) | Out-Null
+    [GeminUp.NativeMethods]::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0) | Out-Null
+}
+
+function Set-SystemProxyAndPolicies {
+    param([object]$State)
+
+    foreach ($path in @($script:InternetSettingsPath, $script:InternetSettingsPolicyPath)) {
+        if (-not (Test-Path -LiteralPath $path)) {
+            New-Item -Path $path -Force | Out-Null
+        }
+    }
+    New-ItemProperty -LiteralPath $script:InternetSettingsPolicyPath -Name 'ProxySettingsPerUser' `
+        -Value 0 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -LiteralPath $script:InternetSettingsPath -Name 'ProxyEnable' -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -LiteralPath $script:InternetSettingsPath -Name 'ProxyServer' `
+        -Value ('127.0.0.1:{0}' -f $script:ListenPort) -PropertyType String -Force | Out-Null
+    New-ItemProperty -LiteralPath $script:InternetSettingsPath -Name 'ProxyOverride' `
+        -Value '<local>;localhost;127.*' -PropertyType String -Force | Out-Null
+    Remove-ItemProperty -LiteralPath $script:InternetSettingsPath -Name 'AutoConfigURL' -ErrorAction SilentlyContinue
+
+    foreach ($path in @(
+            'HKLM:\Software\Policies\Google\Chrome',
+            'HKLM:\Software\Policies\Microsoft\Edge',
+            'HKLM:\Software\Policies\BraveSoftware\Brave')) {
+        if (-not (Test-Path -LiteralPath $path)) {
+            New-Item -Path $path -Force | Out-Null
+        }
+        New-ItemProperty -LiteralPath $path -Name 'WebRtcIPHandlingPolicy' `
+            -Value 'disable_non_proxied_udp' -PropertyType String -Force | Out-Null
+        New-ItemProperty -LiteralPath $path -Name 'QuicAllowed' -Value 0 -PropertyType DWord -Force | Out-Null
+    }
+
+    $preferencesBackup = @($State.PolicyBackups | Where-Object {
+            $_.Path -eq $script:FirefoxPolicyPath -and $_.Name -eq 'Preferences'
+        })
+    if ($preferencesBackup.Count -ne 1) {
+        throw 'Firefox Preferences policy backup is missing from install state.'
+    }
+    Set-FirefoxMachinePolicies -PreferencesBackup $preferencesBackup[0]
+    Notify-InternetSettingsChanged
+    Write-TransportLog OK "Machine proxy points to 127.0.0.1:$script:ListenPort; non-proxied WebRTC and QUIC are disabled."
+}
+
+function Restore-SystemProxyAndPolicies {
+    param([object]$State)
+
+    foreach ($backup in @($State.RegistryBackups)) {
+        Restore-RegistryValue -Backup $backup
+    }
+    foreach ($backup in @($State.PolicyBackups)) {
+        Restore-RegistryValue -Backup $backup
+    }
+    Notify-InternetSettingsChanged
+    Write-TransportLog OK 'Previous machine proxy and browser policy settings restored.'
+}
+
+function Stop-TransportProcess {
+    if (-not (Test-Path -LiteralPath $script:PidPath)) {
+        return
+    }
+    try {
+        $rawPid = Get-Content -LiteralPath $script:PidPath -Raw -Encoding utf8
+        $transportPid = 0
+        if (-not [int]::TryParse($rawPid.Trim(), [ref]$transportPid)) {
+            throw 'PID file is malformed.'
+        }
+        $process = Get-Process -Id $transportPid -ErrorAction SilentlyContinue
+        if ($null -ne $process) {
+            $actualPath = $process.Path
+            if (-not [string]::Equals($actualPath, $script:ExecutablePath, [StringComparison]::OrdinalIgnoreCase)) {
+                Write-TransportLog WARN "Stale PID file points to another executable; PID $transportPid was not stopped."
+                return
+            }
+            Stop-Process -Id $transportPid -Force -ErrorAction Stop
+            $process.WaitForExit(5000) | Out-Null
+            Write-TransportLog OK 'Background transport stopped.'
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $script:PidPath) {
+            Remove-Item -LiteralPath $script:PidPath -Force
+        }
+    }
+}
+
+function Start-TransportProcess {
+    Stop-TransportProcess
+    $arguments = @(
+        'run', '--config', ('"{0}"' -f $script:ConfigPath),
+        '--pid', ('"{0}"' -f $script:PidPath),
+        '--log', ('"{0}"' -f $script:LogPath)
+    )
+    Start-Process -FilePath $script:ExecutablePath -ArgumentList $arguments -WindowStyle Hidden | Out-Null
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        try {
+            $client = [Net.Sockets.TcpClient]::new()
+            $async = $client.BeginConnect('127.0.0.1', $script:ListenPort, $null, $null)
+            if ($async.AsyncWaitHandle.WaitOne(250)) {
+                $client.EndConnect($async)
+                $async.AsyncWaitHandle.Close()
+                $client.Close()
+                Write-TransportLog OK 'Background transport is accepting local connections.'
+                return
+            }
+            $async.AsyncWaitHandle.Close()
+            $client.Close()
+        }
+        catch {
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    throw 'Background transport did not start within 10 seconds. Check transport.log.'
+}
+
+function Register-TransportTask {
+    $taskAction = New-ScheduledTaskAction -Execute $script:ExecutablePath -Argument (
+        'run --config "{0}" --pid "{1}" --log "{2}"' -f $script:ConfigPath, $script:PidPath, $script:LogPath)
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) `
+        -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName $script:TaskName -Action $taskAction -Trigger $trigger `
+        -Principal $principal -Settings $settings -Description 'Routes Gemini and Antigravity dependencies through a user-provided SOCKS5 proxy.' `
+        -Force | Out-Null
+    Write-TransportLog OK 'Machine-wide autostart task registered under SYSTEM.'
+}
+
+function Unregister-TransportTask {
+    $task = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
+    if ($null -ne $task) {
+        Unregister-ScheduledTask -TaskName $script:TaskName -Confirm:$false
+        Write-TransportLog OK 'Autostart task removed.'
+    }
+}
+
+function Test-LocalTransport {
+    $proxyUrl = 'http://127.0.0.1:{0}' -f $script:ListenPort
+    $checks = @(
+        [PSCustomObject]@{ Name = 'Direct route'; Uri = 'https://example.com/' },
+        [PSCustomObject]@{ Name = 'Gemini SOCKS route'; Uri = 'https://gemini.google.com/' }
+    )
+    foreach ($check in $checks) {
+        try {
+            $response = Invoke-WebRequest -Uri $check.Uri -Proxy $proxyUrl -Method Head -TimeoutSec 20 `
+                -UseBasicParsing -MaximumRedirection 0 -ErrorAction Stop
+            Write-TransportLog OK "$($check.Name) answered with HTTP $([int]$response.StatusCode)."
+        }
+        catch {
+            $status = $null
+            if ($_.Exception.Response) {
+                $status = [int]$_.Exception.Response.StatusCode
+            }
+            if ($status -ge 300 -and $status -lt 500) {
+                Write-TransportLog OK "$($check.Name) answered with HTTP $status."
+            }
+            else {
+                throw "$($check.Name) failed: $($_.Exception.Message)"
+            }
+        }
+    }
+}
+
+function Get-TransportProcess {
+    if (-not (Test-Path -LiteralPath $script:PidPath)) {
+        return $null
+    }
+    $rawPid = Get-Content -LiteralPath $script:PidPath -Raw -Encoding utf8
+    $transportPid = 0
+    if (-not [int]::TryParse($rawPid.Trim(), [ref]$transportPid)) {
+        return $null
+    }
+    $process = Get-Process -Id $transportPid -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+        return $null
+    }
+    try {
+        if (-not [string]::Equals($process.Path, $script:ExecutablePath, [StringComparison]::OrdinalIgnoreCase)) {
+            return $null
+        }
+    }
+    catch {
+        return $null
+    }
+    return $process
+}
+
+function Show-TransportStatus {
+    $installed = Test-Path -LiteralPath $script:StatePath
+    $configured = Test-Path -LiteralPath $script:ConfigPath
+    $process = Get-TransportProcess
+    $proxyEnabled = $false
+    $proxyServer = ''
+    try {
+        $settings = Get-Item -LiteralPath $script:InternetSettingsPath
+        $proxyEnabled = [bool]$settings.GetValue('ProxyEnable', 0)
+        $proxyServer = [string]$settings.GetValue('ProxyServer', '')
+    }
+    catch {
+        Write-TransportLog WARN "Cannot read machine proxy state: $($_.Exception.Message)"
+    }
+
+    Write-Host ''
+    Write-Host 'geminUp' -ForegroundColor Green
+    Write-Host ('  Version:       {0}' -f $script:TransportVersion)
+    Write-Host ('  Installed:     {0}' -f $installed)
+    Write-Host ('  SOCKS stored:  {0}' -f $configured)
+    Write-Host ('  Process:       {0}' -f $(if ($null -ne $process) { "running (PID $($process.Id))" } else { 'stopped' }))
+    Write-Host ('  Machine proxy: {0} {1}' -f $proxyEnabled, $proxyServer)
+    $task = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
+    Write-Host ('  Autostart:     {0}' -f ($null -ne $task))
+}
+
+function Enable-Transport {
+    Assert-SupportedWindows
+    Assert-Administrator
+    Build-TransportExecutable
+
+    $hadConfig = Test-Path -LiteralPath $script:ConfigPath
+    $oldConfigBytes = if ($hadConfig) { [IO.File]::ReadAllBytes($script:ConfigPath) } else { $null }
+    try {
+        Invoke-SecureProxyConfiguration
+        $state = Read-JsonFile -Path $script:StatePath
+        if ($null -eq $state) {
+            $state = New-TransportState
+            Save-JsonFile -Path $script:StatePath -Value $state
+        }
+        Set-SystemProxyAndPolicies -State $state
+        Register-TransportTask
+        Start-TransportProcess
+        Test-LocalTransport
+        Write-Host ''
+        Write-Host '========================================' -ForegroundColor Green
+        Write-Host '  SUCCESSFUL: geminUp is enabled' -ForegroundColor Green
+        Write-Host '========================================' -ForegroundColor Green
+        Write-TransportLog OK 'Restart open browsers once to drop old Google connections.'
+    }
+    catch {
+        $failure = $_.Exception.Message
+        try {
+            Stop-TransportProcess
+            if ($hadConfig -and $null -ne $oldConfigBytes) {
+                [IO.File]::WriteAllBytes($script:ConfigPath, $oldConfigBytes)
+                $state = Read-JsonFile -Path $script:StatePath
+                if ($null -ne $state) {
+                    Set-SystemProxyAndPolicies -State $state
+                    Register-TransportTask
+                    Start-TransportProcess
+                    Write-TransportLog WARN 'Previous working proxy configuration restored.'
+                }
+            }
+            else {
+                $state = Read-JsonFile -Path $script:StatePath
+                if ($null -ne $state) {
+                    Restore-SystemProxyAndPolicies -State $state
+                    Unregister-TransportTask
+                    Remove-Item -LiteralPath $script:StatePath -Force -ErrorAction SilentlyContinue
+                }
+                Remove-Item -LiteralPath $script:ConfigPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        catch {
+            Write-TransportLog ERROR "Rollback also failed: $($_.Exception.Message)"
+        }
+        throw $failure
+    }
+}
+
+function Disable-Transport {
+    Assert-SupportedWindows
+    Assert-Administrator
+    Stop-TransportProcess
+    Unregister-TransportTask
+    $state = Read-JsonFile -Path $script:StatePath
+    if ($null -ne $state) {
+        Restore-SystemProxyAndPolicies -State $state
+        Remove-Item -LiteralPath $script:StatePath -Force
+    }
+    else {
+        Write-TransportLog WARN 'Install state is missing; existing Windows proxy settings were not modified.'
+    }
+    if (Test-Path -LiteralPath $script:ConfigPath) {
+        Remove-Item -LiteralPath $script:ConfigPath -Force
+    }
+    Write-TransportLog OK 'geminUp disabled. Encrypted SOCKS5 credentials removed.'
+}
+
+function Show-Menu {
+    while ($true) {
+        Clear-Host
+        Show-TransportStatus
+        Write-Host ''
+        Write-Host '  1. Enter SOCKS5 and enable'
+        Write-Host '  2. Change SOCKS5'
+        Write-Host '  3. Disable and remove from autostart'
+        Write-Host ''
+        $selection = Read-Host 'Select 1-3'
+        try {
+            switch ($selection) {
+                '1' { Enable-Transport; break }
+                '2' { Enable-Transport; break }
+                '3' { Disable-Transport; break }
+                default { Write-TransportLog WARN 'Enter 1, 2 or 3.'; Start-Sleep -Seconds 2; continue }
+            }
+        }
+        catch {
+            Write-TransportLog ERROR $_.Exception.Message
+        }
+        return
+    }
+}
+
+try {
+    switch ($Action) {
+        'menu' { Show-Menu }
+        'enable' { Enable-Transport }
+        'change' { Enable-Transport }
+        'disable' { Disable-Transport }
+        'status' { Show-TransportStatus }
+    }
+}
+catch {
+    Write-TransportLog ERROR $_.Exception.Message
+    exit 1
+}

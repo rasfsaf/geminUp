@@ -1,0 +1,25 @@
+# Build and test output
+*.exe
+*.pdb
+*.log
+*.pid
+*.tmp
+*.zip
+*.sha256
+config.json
+state.json
+.transport-test-*
+.fake-socks-*
+dist/
+artifacts/
+
+# Python test cache
+__pycache__/
+*.py[cod]
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
