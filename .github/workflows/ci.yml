@@ -59,10 +59,18 @@ jobs:
           $aapt = Get-ChildItem "$env:ANDROID_HOME/build-tools" -Filter aapt -Recurse |
             Sort-Object FullName -Descending | Select-Object -First 1
           if ($null -eq $apksigner -or $null -eq $aapt) { throw 'Android verification tools are missing.' }
-          & $apksigner.FullName verify --verbose --print-certs geminUp.apk
-          if ($LASTEXITCODE -ne 0) { throw 'geminUp.apk signature verification failed.' }
-          $badging = & $aapt.FullName dump badging geminUp.apk
-          if ($LASTEXITCODE -ne 0 -or $badging -notmatch "package: name='io.github.rasfsaf.geminup'" -or
-              $badging -match 'application-debuggable') {
+          $signature = @(& $apksigner.FullName verify --verbose --print-certs geminUp.apk 2>&1)
+          $signatureExit = $LASTEXITCODE
+          $signature | Write-Host
+          $signatureText = $signature -join "`n"
+          if ($signatureExit -ne 0 -or
+              $signatureText -notmatch '358ebf38c834496ee38942f0786bd089ac93178b66c19e814bf579dbe39dbdb5') {
+            throw 'geminUp.apk signature or signer verification failed.'
+          }
+          $badging = @(& $aapt.FullName dump badging geminUp.apk)
+          $aaptExit = $LASTEXITCODE
+          $badgingText = $badging -join "`n"
+          if ($aaptExit -ne 0 -or $badgingText -notmatch "package: name='io.github.rasfsaf.geminup'" -or
+              $badgingText -match 'application-debuggable') {
             throw 'Committed geminUp.apk is not the expected production package.'
           }
