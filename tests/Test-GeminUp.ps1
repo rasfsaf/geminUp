@@ -202,8 +202,15 @@ internal static class AntigravityProbe
 
     $configPath = Join-Path $resolvedTestRoot 'config.json'
     Invoke-Configure -Executable $executable -ConfigPath $configPath -SocksPort $socksPort
+    $refreshOutput = & $executable refresh-domains --config $configPath --domains $domainsPath 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Domain refresh failed: $($refreshOutput -join [Environment]::NewLine)"
+    }
     $transportPort = Get-FreeTcpPort
     $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (@($config.ProxyPatterns) -notcontains 'antigravity.google.com') {
+        throw 'Domain refresh did not store the Antigravity endpoint.'
+    }
     $config.ListenPort = $transportPort
     [IO.File]::WriteAllText(
         $configPath,

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('menu', 'enable', 'change', 'disable', 'status')]
+    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status')]
     [string]$Action = 'menu'
 )
 
@@ -171,12 +171,14 @@ function Get-CSharpCompiler {
 }
 
 function Build-TransportExecutable {
+    param([switch]$Force)
+
     if (-not (Test-Path -LiteralPath $script:SourcePath)) {
         throw "Transport source is missing: $script:SourcePath"
     }
     Initialize-InstallDirectory
 
-    $requiresBuild = -not (Test-Path -LiteralPath $script:ExecutablePath)
+    $requiresBuild = $Force -or -not (Test-Path -LiteralPath $script:ExecutablePath)
     if (-not $requiresBuild) {
         $requiresBuild = (Get-Item -LiteralPath $script:SourcePath).LastWriteTimeUtc -gt
             (Get-Item -LiteralPath $script:ExecutablePath).LastWriteTimeUtc
@@ -258,6 +260,14 @@ function Invoke-SecureProxyConfiguration {
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
         }
     }
+}
+
+function Invoke-DomainConfigurationRefresh {
+    $output = & $script:ExecutablePath refresh-domains --config $script:ConfigPath --domains $script:DomainPath 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cannot refresh protected domains: $($output -join [Environment]::NewLine)"
+    }
+    Write-TransportLog OK ($output -join ' ')
 }
 
 function Get-RegistryValueBackup {
@@ -868,6 +878,46 @@ function Enable-Transport {
     }
 }
 
+function Refresh-Transport {
+    Assert-SupportedWindows
+    Assert-Administrator
+    if (-not (Test-Path -LiteralPath $script:ConfigPath) -or
+        -not (Test-Path -LiteralPath $script:StatePath)) {
+        throw 'geminUp is not configured yet. Use menu option 1 first.'
+    }
+
+    $state = Read-JsonFile -Path $script:StatePath
+    try {
+        Build-TransportExecutable -Force
+        Invoke-DomainConfigurationRefresh
+        Set-SystemProxyAndPolicies -State $state
+        Register-TransportTask
+        Start-TransportProcess
+        Test-LocalTransport
+        Set-AntigravityShortcutRouting -State $state
+        Write-Host ''
+        Write-Host '========================================' -ForegroundColor Green
+        Write-Host '  SUCCESSFUL: geminUp was refreshed' -ForegroundColor Green
+        Write-Host '========================================' -ForegroundColor Green
+        Write-TransportLog OK 'Fully exit and reopen Antigravity and open browsers to use the refreshed transport.'
+    }
+    catch {
+        $failure = $_.Exception.Message
+        try {
+            if ((Test-Path -LiteralPath $script:ExecutablePath) -and
+                (Test-Path -LiteralPath $script:ConfigPath)) {
+                Register-TransportTask
+                Start-TransportProcess
+                Write-TransportLog WARN 'Transport was restarted after the refresh failure.'
+            }
+        }
+        catch {
+            Write-TransportLog ERROR "Refresh recovery also failed: $($_.Exception.Message)"
+        }
+        throw $failure
+    }
+}
+
 function Disable-Transport {
     Assert-SupportedWindows
     Assert-Administrator
@@ -896,14 +946,16 @@ function Show-Menu {
         Write-Host '  1. Enter SOCKS5 and enable'
         Write-Host '  2. Change SOCKS5'
         Write-Host '  3. Disable and remove from autostart'
+        Write-Host '  4. Apply downloaded update and restart'
         Write-Host ''
-        $selection = Read-Host 'Select 1-3'
+        $selection = Read-Host 'Select 1-4'
         try {
             switch ($selection) {
                 '1' { Enable-Transport; break }
                 '2' { Enable-Transport; break }
                 '3' { Disable-Transport; break }
-                default { Write-TransportLog WARN 'Enter 1, 2 or 3.'; Start-Sleep -Seconds 2; continue }
+                '4' { Refresh-Transport; break }
+                default { Write-TransportLog WARN 'Enter 1, 2, 3 or 4.'; Start-Sleep -Seconds 2; continue }
             }
         }
         catch {
@@ -918,6 +970,7 @@ try {
         'menu' { Show-Menu }
         'enable' { Enable-Transport }
         'change' { Enable-Transport }
+        'refresh' { Refresh-Transport }
         'disable' { Disable-Transport }
         'status' { Show-TransportStatus }
     }

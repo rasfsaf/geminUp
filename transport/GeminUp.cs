@@ -692,6 +692,7 @@ namespace GeminUp
                 string command = args[0].ToLowerInvariant();
                 string configPath = GetOption(args, "--config", true);
                 if (command == "configure") return Configure(configPath, GetOption(args, "--domains", false));
+                if (command == "refresh-domains") return RefreshDomains(configPath, GetOption(args, "--domains", true));
                 if (command == "test") return Test(configPath);
                 if (command == "launch-antigravity")
                     return AntigravityLauncher.Launch(configPath, GetOption(args, "--target", true),
@@ -730,6 +731,17 @@ namespace GeminUp
             ProxyDefinition proxy = ConfigStore.DecryptProxy(config);
             VerifyProxy(proxy);
             Console.WriteLine("OK: SOCKS5 " + proxy.SafeDescription + " reaches Gemini with valid TLS.");
+            return 0;
+        }
+
+        private static int RefreshDomains(string configPath, string domainsPath)
+        {
+            TransportConfig config = ConfigStore.LoadConfig(configPath);
+            ProxyDefinition proxy = ConfigStore.DecryptProxy(config);
+            string[] patterns = ConfigStore.LoadPatterns(domainsPath);
+            ConfigStore.Save(configPath, proxy, patterns);
+            Console.WriteLine("OK: " + patterns.Length.ToString(CultureInfo.InvariantCulture) +
+                " protected domain patterns refreshed without changing SOCKS5 credentials.");
             return 0;
         }
 
@@ -789,6 +801,7 @@ namespace GeminUp
         {
             Console.Error.WriteLine("ERROR: " + error);
             Console.Error.WriteLine("Usage: geminUp.exe configure --config PATH [--domains PATH]");
+            Console.Error.WriteLine("       geminUp.exe refresh-domains --config PATH --domains PATH");
             Console.Error.WriteLine("       geminUp.exe test --config PATH");
             Console.Error.WriteLine("       geminUp.exe run --config PATH --pid PATH --log PATH");
             Console.Error.WriteLine("       geminUp.exe launch-antigravity --config PATH --target PATH [--original-arguments BASE64]");

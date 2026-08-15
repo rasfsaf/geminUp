@@ -21,6 +21,10 @@ if errorlevel 1 (
     exit /b
 )
 
+echo.
+echo [IMPORTANT] Downloading/replacing geminUp files does not update the running transport.
+echo [IMPORTANT] After every update, select menu option 4 to rebuild and restart it.
+echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0geminUp.ps1" menu
 set "transport_exit=%errorlevel%"
 if not "%transport_exit%"=="0" (
