@@ -33,20 +33,27 @@ import androidx.webkit.ProxyController;
 import androidx.webkit.WebViewFeature;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
+import java.net.Proxy;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TimeZone;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class MainActivity extends Activity {
     private static final String TAG = "geminUp";
@@ -68,43 +75,146 @@ public class MainActivity extends Activity {
     private ScrollView terminalScroll;
     private boolean isTerminalVisible = false;
     private boolean isControlBarVisible = false;
+    private final ExecutorService backgroundExecutor = Executors.newCachedThreadPool();
+    private final AtomicInteger proxyGeneration = new AtomicInteger();
 
-    private static final String JS_SPOOF_INJECTION =
-        "(function() {" +
-        "  try {" +
-        "    const TARGET_TIMEZONE = 'Europe/London';" +
-        "    const TARGET_LOCALE = 'en-GB';" +
-        "    const TARGET_LANGS = Object.freeze(['en-GB', 'en', 'en-US']);" +
-        "    const SPOOF_COORDS = { latitude: 51.5074, longitude: -0.1278, accuracy: 15, altitude: null, altitudeAccuracy: null, heading: null, speed: null };" +
-        "    const createPosition = () => ({ coords: SPOOF_COORDS, timestamp: Date.now() });" +
-        "    if (navigator.geolocation) {" +
-        "      navigator.geolocation.getCurrentPosition = function(s) { if(typeof s === 'function') setTimeout(() => s(createPosition()), 5); };" +
-        "      navigator.geolocation.watchPosition = function(s) { if(typeof s === 'function') setTimeout(() => s(createPosition()), 5); return 100; };" +
-        "      navigator.geolocation.clearWatch = function() {};" +
-        "    }" +
-        "    if (navigator.permissions && typeof navigator.permissions.query === 'function') {" +
-        "      const origQ = navigator.permissions.query.bind(navigator.permissions);" +
-        "      navigator.permissions.query = function(p) {" +
-        "        if (p && p.name === 'geolocation') return Promise.resolve({ name: 'geolocation', state: 'granted', onchange: null, addEventListener: ()=>{}, removeEventListener: ()=>{}, dispatchEvent: ()=>true });" +
-        "        return origQ(p);" +
-        "      };" +
-        "    }" +
-        "    try {" +
-        "      Object.defineProperty(navigator, 'language', { get: () => TARGET_LOCALE, configurable: true });" +
-        "      Object.defineProperty(navigator, 'languages', { get: () => TARGET_LANGS, configurable: true });" +
-        "    } catch(e) {}" +
-        "    const OrigDTF = Intl.DateTimeFormat;" +
-        "    function PatchedDTF(locales, options) {" +
-        "      const opts = Object.assign({}, options);" +
-        "      if (!opts.timeZone) opts.timeZone = TARGET_TIMEZONE;" +
-        "      return new OrigDTF(locales || TARGET_LOCALE, opts);" +
-        "    }" +
-        "    PatchedDTF.prototype = OrigDTF.prototype;" +
-        "    PatchedDTF.supportedLocalesOf = OrigDTF.supportedLocalesOf.bind(OrigDTF);" +
-        "    PatchedDTF.prototype.resolvedOptions = function() { const o = OrigDTF.prototype.resolvedOptions.call(this); o.timeZone = TARGET_TIMEZONE; return o; };" +
-        "    try { Intl.DateTimeFormat = PatchedDTF; } catch(e) {}" +
-        "  } catch(err) { console.error('Spoof injection error:', err); }" +
-        "})();";
+    private volatile GeoProfile currentGeoProfile = GeoProfile.getDefault();
+
+    public static class GeoProfile {
+        public final String countryCode;
+        public final String timeZone;
+        public final String locale;
+        public final String[] languages;
+        public final double latitude;
+        public final double longitude;
+
+        public GeoProfile(String countryCode, String timeZone, String locale, String[] languages, double latitude, double longitude) {
+            this.countryCode = countryCode;
+            this.timeZone = timeZone;
+            this.locale = locale;
+            this.languages = languages;
+            this.latitude = latitude;
+            this.longitude = longitude;
+        }
+
+        public String getAcceptLanguageHeader() {
+            if ("de-DE".equals(locale)) {
+                return "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7";
+            } else if ("fr-FR".equals(locale)) {
+                return "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7";
+            } else if ("en-US".equals(locale)) {
+                return "en-US,en;q=0.9";
+            }
+            return locale + ",en;q=0.9,en-US;q=0.8";
+        }
+
+        public static GeoProfile getDefault() {
+            return new GeoProfile("GB", "Europe/London", "en-GB", new String[]{"en-GB", "en", "en-US"}, 51.5074, -0.1278);
+        }
+
+        public static GeoProfile forCountry(String code, String fallbackTz, Double lat, Double lon) {
+            if (code == null) return getDefault();
+            String c = code.trim().toUpperCase(Locale.ROOT);
+            if (!c.matches("[A-Z]{2}")) return getDefault();
+            switch (c) {
+                case "DE":
+                    return new GeoProfile("DE", safeTimeZone(fallbackTz, "Europe/Berlin"), "de-DE", new String[]{"de-DE", "de", "en-US", "en"}, safeCoordinate(lat, -90, 90, 52.5200), safeCoordinate(lon, -180, 180, 13.4050));
+                case "US":
+                    return new GeoProfile("US", safeTimeZone(fallbackTz, "America/New_York"), "en-US", new String[]{"en-US", "en"}, safeCoordinate(lat, -90, 90, 40.7128), safeCoordinate(lon, -180, 180, -74.0060));
+                case "GB":
+                case "UK":
+                    return new GeoProfile("GB", safeTimeZone(fallbackTz, "Europe/London"), "en-GB", new String[]{"en-GB", "en", "en-US"}, safeCoordinate(lat, -90, 90, 51.5074), safeCoordinate(lon, -180, 180, -0.1278));
+                case "FR":
+                    return new GeoProfile("FR", safeTimeZone(fallbackTz, "Europe/Paris"), "fr-FR", new String[]{"fr-FR", "fr", "en-US", "en"}, safeCoordinate(lat, -90, 90, 48.8566), safeCoordinate(lon, -180, 180, 2.3522));
+                case "NL":
+                    return new GeoProfile("NL", safeTimeZone(fallbackTz, "Europe/Amsterdam"), "nl-NL", new String[]{"nl-NL", "nl", "en-US", "en"}, safeCoordinate(lat, -90, 90, 52.3676), safeCoordinate(lon, -180, 180, 4.9041));
+                case "SE":
+                    return new GeoProfile("SE", safeTimeZone(fallbackTz, "Europe/Stockholm"), "sv-SE", new String[]{"sv-SE", "sv", "en-US", "en"}, safeCoordinate(lat, -90, 90, 59.3293), safeCoordinate(lon, -180, 180, 18.0686));
+                case "CH":
+                    return new GeoProfile("CH", safeTimeZone(fallbackTz, "Europe/Zurich"), "de-CH", new String[]{"de-CH", "de", "en-US", "en"}, safeCoordinate(lat, -90, 90, 47.3769), safeCoordinate(lon, -180, 180, 8.5417));
+                case "AT":
+                    return new GeoProfile("AT", safeTimeZone(fallbackTz, "Europe/Vienna"), "de-AT", new String[]{"de-AT", "de", "en-US", "en"}, safeCoordinate(lat, -90, 90, 48.2082), safeCoordinate(lon, -180, 180, 16.3738));
+                case "PL":
+                    return new GeoProfile("PL", safeTimeZone(fallbackTz, "Europe/Warsaw"), "pl-PL", new String[]{"pl-PL", "pl", "en-US", "en"}, safeCoordinate(lat, -90, 90, 52.2297), safeCoordinate(lon, -180, 180, 21.0122));
+                case "ES":
+                    return new GeoProfile("ES", safeTimeZone(fallbackTz, "Europe/Madrid"), "es-ES", new String[]{"es-ES", "es", "en-US", "en"}, safeCoordinate(lat, -90, 90, 40.4168), safeCoordinate(lon, -180, 180, -3.7038));
+                case "IT":
+                    return new GeoProfile("IT", safeTimeZone(fallbackTz, "Europe/Rome"), "it-IT", new String[]{"it-IT", "it", "en-US", "en"}, safeCoordinate(lat, -90, 90, 41.9028), safeCoordinate(lon, -180, 180, 12.4964));
+                case "CA":
+                    return new GeoProfile("CA", safeTimeZone(fallbackTz, "America/Toronto"), "en-CA", new String[]{"en-CA", "en", "en-US"}, safeCoordinate(lat, -90, 90, 43.6532), safeCoordinate(lon, -180, 180, -79.3832));
+                case "AU":
+                    return new GeoProfile("AU", safeTimeZone(fallbackTz, "Australia/Sydney"), "en-AU", new String[]{"en-AU", "en", "en-US"}, safeCoordinate(lat, -90, 90, -33.8688), safeCoordinate(lon, -180, 180, 151.2093));
+                case "JP":
+                    return new GeoProfile("JP", safeTimeZone(fallbackTz, "Asia/Tokyo"), "ja-JP", new String[]{"ja-JP", "ja", "en-US", "en"}, safeCoordinate(lat, -90, 90, 35.6762), safeCoordinate(lon, -180, 180, 139.6503));
+                case "FI":
+                    return new GeoProfile("FI", safeTimeZone(fallbackTz, "Europe/Helsinki"), "fi-FI", new String[]{"fi-FI", "fi", "en-US", "en"}, safeCoordinate(lat, -90, 90, 60.1699), safeCoordinate(lon, -180, 180, 24.9384));
+                case "NO":
+                    return new GeoProfile("NO", safeTimeZone(fallbackTz, "Europe/Oslo"), "nb-NO", new String[]{"nb-NO", "no", "en-US", "en"}, safeCoordinate(lat, -90, 90, 59.9139), safeCoordinate(lon, -180, 180, 10.7522));
+                default:
+                    String tz = safeTimeZone(fallbackTz, "UTC");
+                    double la = safeCoordinate(lat, -90, 90, 51.5074);
+                    double lo = safeCoordinate(lon, -180, 180, -0.1278);
+                    return new GeoProfile(c, tz, "en-US", new String[]{"en-US", "en"}, la, lo);
+            }
+        }
+
+        private static String safeTimeZone(String candidate, String fallback) {
+            if (candidate == null || candidate.trim().isEmpty()) return fallback;
+            String value = candidate.trim();
+            TimeZone parsed = TimeZone.getTimeZone(value);
+            if ("GMT".equals(parsed.getID()) && !"GMT".equalsIgnoreCase(value)) return fallback;
+            return value;
+        }
+
+        private static double safeCoordinate(Double value, double minimum, double maximum, double fallback) {
+            if (value == null || value.isNaN() || value.isInfinite() || value < minimum || value > maximum) {
+                return fallback;
+            }
+            return value;
+        }
+    }
+
+    private String buildSpoofJs(GeoProfile profile) {
+        if (profile == null) profile = GeoProfile.getDefault();
+        JSONArray langsJson = new JSONArray();
+        for (String language : profile.languages) langsJson.put(language);
+
+        return "(function() {" +
+            "  try {" +
+            "    const TARGET_TIMEZONE = " + JSONObject.quote(profile.timeZone) + ";" +
+            "    const TARGET_LOCALE = " + JSONObject.quote(profile.locale) + ";" +
+            "    const TARGET_LANGS = Object.freeze(" + langsJson + ");" +
+            "    const SPOOF_COORDS = { latitude: " + profile.latitude + ", longitude: " + profile.longitude + ", accuracy: 15, altitude: null, altitudeAccuracy: null, heading: null, speed: null };" +
+            "    const createPosition = () => ({ coords: SPOOF_COORDS, timestamp: Date.now() });" +
+            "    if (navigator.geolocation) {" +
+            "      navigator.geolocation.getCurrentPosition = function(s) { if(typeof s === 'function') setTimeout(() => s(createPosition()), 5); };" +
+            "      navigator.geolocation.watchPosition = function(s) { if(typeof s === 'function') setTimeout(() => s(createPosition()), 5); return 100; };" +
+            "      navigator.geolocation.clearWatch = function() {};" +
+            "    }" +
+            "    if (navigator.permissions && typeof navigator.permissions.query === 'function') {" +
+            "      const origQ = navigator.permissions.query.bind(navigator.permissions);" +
+            "      navigator.permissions.query = function(p) {" +
+            "        if (p && p.name === 'geolocation') return Promise.resolve({ name: 'geolocation', state: 'granted', onchange: null, addEventListener: ()=>{}, removeEventListener: ()=>{}, dispatchEvent: ()=>true });" +
+            "        return origQ(p);" +
+            "      };" +
+            "    }" +
+            "    try {" +
+            "      Object.defineProperty(navigator, 'language', { get: () => TARGET_LOCALE, configurable: true });" +
+            "      Object.defineProperty(navigator, 'languages', { get: () => TARGET_LANGS, configurable: true });" +
+            "    } catch(e) {}" +
+            "    const OrigDTF = Intl.DateTimeFormat;" +
+            "    function PatchedDTF(locales, options) {" +
+            "      const opts = Object.assign({}, options);" +
+            "      if (!opts.timeZone) opts.timeZone = TARGET_TIMEZONE;" +
+            "      return new OrigDTF(locales || TARGET_LOCALE, opts);" +
+            "    }" +
+            "    PatchedDTF.prototype = OrigDTF.prototype;" +
+            "    PatchedDTF.supportedLocalesOf = OrigDTF.supportedLocalesOf.bind(OrigDTF);" +
+            "    PatchedDTF.prototype.resolvedOptions = function() { const o = OrigDTF.prototype.resolvedOptions.call(this); o.timeZone = TARGET_TIMEZONE; return o; };" +
+            "    try { Intl.DateTimeFormat = PatchedDTF; } catch(e) {}" +
+            "  } catch(err) { console.error('Spoof injection error:', err); }" +
+            "})();";
+    }
 
     @Override
     @SuppressLint({"SetJavaScriptEnabled", "ClickableViewAccessibility"})
@@ -323,28 +433,29 @@ public class MainActivity extends Activity {
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
                 logTerminal("Loading: " + url);
-                view.evaluateJavascript(JS_SPOOF_INJECTION, null);
+                view.evaluateJavascript(buildSpoofJs(currentGeoProfile), null);
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 logTerminal("Page loaded: " + url);
-                view.evaluateJavascript(JS_SPOOF_INJECTION, null);
+                view.evaluateJavascript(buildSpoofJs(currentGeoProfile), null);
             }
 
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 if (request != null && request.getUrl() != null) {
                     String url = request.getUrl().toString();
-                    if (url.contains("hl=ru") || (url.contains("gemini.google.com") && !url.contains("hl=en-GB"))) {
+                    String currentLocale = (currentGeoProfile != null) ? currentGeoProfile.locale : "en-US";
+                    if (url.contains("hl=ru") || (url.contains("gemini.google.com") && !url.contains("hl="))) {
                         if (url.contains("hl=")) {
-                            url = url.replaceAll("hl=[^&]+", "hl=en-GB");
+                            url = url.replaceAll("hl=[^&]+", "hl=" + currentLocale);
                         } else {
-                            url = url + (url.contains("?") ? "&hl=en-GB" : "?hl=en-GB");
+                            url = url + (url.contains("?") ? "&hl=" + currentLocale : "?hl=" + currentLocale);
                         }
                         Map<String, String> headers = new HashMap<>();
-                        headers.put("Accept-Language", "en-GB,en;q=0.9,en-US;q=0.8");
+                        headers.put("Accept-Language", (currentGeoProfile != null) ? currentGeoProfile.getAcceptLanguageHeader() : "en-US,en;q=0.9");
                         view.loadUrl(url, headers);
                         return true;
                     }
@@ -490,7 +601,123 @@ public class MainActivity extends Activity {
         prefs.edit().putString(KEY_PROXY_HISTORY, arr.toString()).apply();
     }
 
+    private void resolveGeoProfileAsync(int localPort, String proxyKey, int generation) {
+        backgroundExecutor.submit(() -> {
+            Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress("127.0.0.1", localPort));
+            GeoProfile detectedProfile = null;
+            String provider = null;
+
+            try {
+                detectedProfile = resolveGeoWithIpWho(proxy);
+                provider = "ipwho.is";
+            } catch (Exception primaryError) {
+                Log.d(TAG, "Primary GeoIP failed: " + primaryError.getMessage());
+                try {
+                    detectedProfile = resolveGeoWithCloudflare(proxy);
+                    provider = "Cloudflare Trace";
+                } catch (Exception fallbackError) {
+                    Log.d(TAG, "Fallback GeoIP failed: " + fallbackError.getMessage());
+                }
+            }
+
+            if (proxyGeneration.get() != generation) return;
+            if (detectedProfile == null) {
+                logTerminal("WARN: Proxy country was not detected; SOCKS5 routing stays active with cached/default geo profile.");
+                return;
+            }
+
+            currentGeoProfile = detectedProfile;
+            try {
+                JSONObject cached = new JSONObject();
+                cached.put("countryCode", detectedProfile.countryCode);
+                cached.put("timezone", detectedProfile.timeZone);
+                cached.put("lat", detectedProfile.latitude);
+                cached.put("lon", detectedProfile.longitude);
+                prefs.edit().putString("geo_cache_" + proxyKey, cached.toString()).apply();
+            } catch (Exception cacheError) {
+                Log.w(TAG, "Cannot cache the detected proxy geo profile.", cacheError);
+            }
+
+            GeoProfile finalProfile = detectedProfile;
+            logTerminal("Auto-detected proxy geo via " + provider + ": " + finalProfile.countryCode + " (" + finalProfile.timeZone + ", " + finalProfile.locale + ")");
+            runOnUiThread(() -> {
+                if (proxyGeneration.get() == generation && webView != null && !isFinishing()) {
+                    String currentUrl = webView.getUrl();
+                    webView.evaluateJavascript(buildSpoofJs(finalProfile), null);
+                    if (currentUrl == null || currentUrl.contains("gemini.google.com")) {
+                        loadInitialUrl();
+                    }
+                }
+            });
+        });
+    }
+
+    private GeoProfile resolveGeoWithIpWho(Proxy proxy) throws Exception {
+        String response = readGeoResponse(
+                new URL("https://ipwho.is/?fields=success,country_code,timezone,latitude,longitude"),
+                proxy
+        );
+        JSONObject json = new JSONObject(response);
+        if (!json.optBoolean("success", false)) throw new IOException("ipwho.is returned an unsuccessful response.");
+
+        String countryCode = json.optString("country_code", null);
+        if (countryCode == null || !countryCode.matches("[A-Za-z]{2}")) {
+            throw new IOException("ipwho.is did not return a country code.");
+        }
+        JSONObject timezoneObject = json.optJSONObject("timezone");
+        String timezone = timezoneObject != null ? timezoneObject.optString("id", null) : null;
+        return GeoProfile.forCountry(
+                countryCode,
+                timezone,
+                json.has("latitude") ? json.optDouble("latitude") : null,
+                json.has("longitude") ? json.optDouble("longitude") : null
+        );
+    }
+
+    private GeoProfile resolveGeoWithCloudflare(Proxy proxy) throws Exception {
+        String response = readGeoResponse(new URL("https://www.cloudflare.com/cdn-cgi/trace"), proxy);
+        String countryCode = null;
+        for (String line : response.split("\\r?\\n")) {
+            if (line.startsWith("loc=")) {
+                countryCode = line.substring(4).trim();
+                break;
+            }
+        }
+        if (countryCode == null || !countryCode.matches("[A-Za-z]{2}")) {
+            throw new IOException("Cloudflare Trace did not return a country code.");
+        }
+        return GeoProfile.forCountry(countryCode, null, null, null);
+    }
+
+    private String readGeoResponse(URL url, Proxy proxy) throws Exception {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) url.openConnection(proxy);
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(8000);
+            conn.setRequestProperty("User-Agent", "geminUp/2.0");
+            int status = conn.getResponseCode();
+            if (status != HttpURLConnection.HTTP_OK) {
+                throw new IOException(url.getHost() + " returned HTTP " + status + ".");
+            }
+
+            StringBuilder response = new StringBuilder();
+            try (InputStream input = conn.getInputStream()) {
+                byte[] buffer = new byte[4096];
+                int length;
+                while ((length = input.read(buffer)) != -1) {
+                    response.append(new String(buffer, 0, length, StandardCharsets.UTF_8));
+                    if (response.length() > 16384) throw new IOException("GeoIP response is too large.");
+                }
+            }
+            return response.toString();
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
     private void applyConfiguredProxyAndLoad() {
+        int generation = proxyGeneration.incrementAndGet();
         updateButtonVisualState();
         boolean isEnabled = prefs.getBoolean(KEY_PROXY_ENABLED, true);
         String proxyStr = prefs.getString(KEY_PROXY_RAW, "");
@@ -505,49 +732,98 @@ public class MainActivity extends Activity {
         if (isEnabled && parsed != null && parsed.isValid()) {
             try {
                 saveProxyToHistory(proxyStr);
+                String proxyKey = safeProxyKey(proxyStr);
+
+                // Load cached GeoProfile if exists
+                String cachedGeo = prefs.getString("geo_cache_" + proxyKey, "");
+                if (!cachedGeo.isEmpty()) {
+                    try {
+                        JSONObject obj = new JSONObject(cachedGeo);
+                        currentGeoProfile = GeoProfile.forCountry(
+                                obj.optString("countryCode", "GB"),
+                                obj.optString("timezone", "Europe/London"),
+                                obj.optDouble("lat", 51.5074),
+                                obj.optDouble("lon", -0.1278)
+                        );
+                        logTerminal("Cached geo profile: " + currentGeoProfile.countryCode + " (" + currentGeoProfile.timeZone + ")");
+                    } catch (Exception ignored) {}
+                }
+
                 localBridge = new LocalHttpToSocksBridge(parsed.host, parsed.port, parsed.user, parsed.pass);
                 localBridge.start();
                 int localPort = localBridge.getLocalPort();
                 logTerminal("Local Bridge active on 127.0.0.1:" + localPort + " -> SOCKS5 " + parsed.host + ":" + parsed.port);
+
+                resolveGeoProfileAsync(localPort, proxyKey, generation);
 
                 if (WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
                     String proxyUrl = "http://127.0.0.1:" + localPort;
                     ProxyConfig proxyConfig = new ProxyConfig.Builder()
                             .addProxyRule(proxyUrl)
                             .build();
-                    ProxyController.getInstance().setProxyOverride(proxyConfig, Executors.newSingleThreadExecutor(), () -> {
+                    ProxyController.getInstance().setProxyOverride(proxyConfig, backgroundExecutor, () -> {
                         runOnUiThread(() -> {
-                            logTerminal("Proxy override set successfully.");
+                            if (proxyGeneration.get() != generation || isFinishing()) return;
+                            logTerminal("Proxy override set successfully (Fail-Closed active).");
                             loadInitialUrl();
                         });
                     });
                     return;
                 } else {
+                    proxyGeneration.compareAndSet(generation, generation + 1);
+                    if (localBridge != null) {
+                        localBridge.stop();
+                        localBridge = null;
+                    }
                     logTerminal("WARN: PROXY_OVERRIDE not supported by system WebView.");
+                    showBlockedPage("Системный WebView не поддерживает безопасную маршрутизацию через SOCKS5.");
+                    return;
                 }
             } catch (Exception e) {
+                proxyGeneration.compareAndSet(generation, generation + 1);
                 logTerminal("ERROR: " + e.getMessage());
                 Toast.makeText(this, "Proxy error: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                if (localBridge != null) {
+                    localBridge.stop();
+                    localBridge = null;
+                }
+                showBlockedPage("SOCKS5 недоступен. Прямое подключение заблокировано.");
+                return;
             }
-        } else {
+        } else if (!isEnabled) {
+            currentGeoProfile = GeoProfile.getDefault();
             if (WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
-                ProxyController.getInstance().clearProxyOverride(Executors.newSingleThreadExecutor(), () -> {
+                ProxyController.getInstance().clearProxyOverride(backgroundExecutor, () -> {
                     runOnUiThread(() -> {
+                        if (proxyGeneration.get() != generation || isFinishing()) return;
                         logTerminal("Proxy override cleared (Direct Connection).");
                         loadInitialUrl();
                     });
                 });
                 return;
             }
+        } else {
+            logTerminal("WARN: Proxy is enabled but its configuration is invalid; direct connection is blocked.");
+            showBlockedPage("Укажи корректный SOCKS5. Прямое подключение заблокировано.");
+            return;
         }
         loadInitialUrl();
     }
 
+    private void showBlockedPage(String reason) {
+        String html = "<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\">" +
+                "<body style=\"margin:0;background:#050805;color:#55ff77;font:16px monospace;display:flex;min-height:100vh;align-items:center;justify-content:center\">" +
+                "<main style=\"max-width:680px;padding:32px\"><h1>geminUp: FAIL-CLOSED</h1><p>" +
+                android.text.Html.escapeHtml(reason) +
+                "</p><p>Трафик Gemini не был отправлен напрямую.</p></main></body>";
+        webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
+    }
+
     private void loadInitialUrl() {
         Map<String, String> extraHeaders = new HashMap<>();
-        extraHeaders.put("Accept-Language", "en-GB,en;q=0.9,en-US;q=0.8");
-        String url = "https://gemini.google.com/?hl=en-GB";
-        logTerminal("Connecting to " + url);
+        extraHeaders.put("Accept-Language", currentGeoProfile.getAcceptLanguageHeader());
+        String url = "https://gemini.google.com/?hl=" + currentGeoProfile.locale;
+        logTerminal("Connecting to " + url + " [" + currentGeoProfile.countryCode + "]");
         webView.loadUrl(url, extraHeaders);
     }
 
@@ -649,6 +925,12 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static String safeProxyKey(String raw) {
+        ProxyConfigHolder parsed = parseProxy(raw);
+        if (parsed == null || !parsed.isValid()) return "default";
+        return parsed.host.replaceAll("[^a-zA-Z0-9.-]", "_") + "_" + parsed.port;
+    }
+
     private static String safeProxyLabel(String raw) {
         ProxyConfigHolder parsed = parseProxy(raw);
         if (parsed == null || !parsed.isValid()) return "invalid proxy";
@@ -710,9 +992,11 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        proxyGeneration.incrementAndGet();
         if (localBridge != null) {
             localBridge.stop();
         }
+        backgroundExecutor.shutdownNow();
     }
 
     public static class LocalHttpToSocksBridge {
@@ -763,9 +1047,91 @@ public class MainActivity extends Activity {
             }
         }
 
+        private static Socket connectAndHandshakeSocks(String socksHost, int socksPort, String socksUser, String socksPass, String targetHost, int targetPort, int timeoutMs) throws Exception {
+            Socket upstream = new Socket();
+            upstream.setTcpNoDelay(true);
+            upstream.setKeepAlive(true);
+            upstream.connect(new InetSocketAddress(socksHost, socksPort), timeoutMs);
+            upstream.setSoTimeout(30000);
+
+            InputStream sIn = upstream.getInputStream();
+            OutputStream sOut = upstream.getOutputStream();
+
+            boolean hasAuth = (socksUser != null && !socksUser.isEmpty());
+            if (hasAuth) {
+                sOut.write(new byte[]{0x05, 0x02, 0x00, 0x02});
+            } else {
+                sOut.write(new byte[]{0x05, 0x01, 0x00});
+            }
+            sOut.flush();
+
+            int sVer = sIn.read();
+            int sMethod = sIn.read();
+            if (sVer != 0x05) throw new IOException("Invalid SOCKS5 version: " + sVer);
+
+            if (sMethod == 0x02 && hasAuth) {
+                byte[] uBytes = socksUser.getBytes(StandardCharsets.UTF_8);
+                byte[] pBytes = (socksPass != null ? socksPass : "").getBytes(StandardCharsets.UTF_8);
+                byte[] authReq = new byte[3 + uBytes.length + pBytes.length];
+                authReq[0] = 0x01;
+                authReq[1] = (byte) uBytes.length;
+                System.arraycopy(uBytes, 0, authReq, 2, uBytes.length);
+                authReq[2 + uBytes.length] = (byte) pBytes.length;
+                System.arraycopy(pBytes, 0, authReq, 3 + uBytes.length, pBytes.length);
+                sOut.write(authReq);
+                sOut.flush();
+
+                int aVer = sIn.read();
+                int aStatus = sIn.read();
+                if (aStatus != 0x00) throw new IOException("SOCKS5 Auth failed status: " + aStatus);
+            } else if (sMethod != 0x00) {
+                throw new IOException("SOCKS5 Unsupported auth method: " + sMethod);
+            }
+
+            byte[] hostBytes = targetHost.getBytes(StandardCharsets.UTF_8);
+            byte[] connReq = new byte[7 + hostBytes.length];
+            connReq[0] = 0x05;
+            connReq[1] = 0x01;
+            connReq[2] = 0x00;
+            connReq[3] = 0x03;
+            connReq[4] = (byte) hostBytes.length;
+            System.arraycopy(hostBytes, 0, connReq, 5, hostBytes.length);
+            connReq[5 + hostBytes.length] = (byte) ((targetPort >> 8) & 0xFF);
+            connReq[6 + hostBytes.length] = (byte) (targetPort & 0xFF);
+            sOut.write(connReq);
+            sOut.flush();
+
+            int cVer = sIn.read();
+            int cRep = sIn.read();
+            sIn.read(); // Reserved byte
+            int cAtyp = sIn.read();
+            if (cRep != 0x00) throw new IOException("SOCKS5 Connect rejected with code: " + cRep);
+
+            if (cAtyp == 0x01) {
+                byte[] ip = new byte[4];
+                int read = 0;
+                while (read < 4) { int r = sIn.read(ip, read, 4 - read); if (r == -1) break; read += r; }
+            } else if (cAtyp == 0x03) {
+                int dLen = sIn.read();
+                byte[] d = new byte[dLen];
+                int read = 0;
+                while (read < dLen) { int r = sIn.read(d, read, dLen - read); if (r == -1) break; read += r; }
+            } else if (cAtyp == 0x04) {
+                byte[] ip6 = new byte[16];
+                int read = 0;
+                while (read < 16) { int r = sIn.read(ip6, read, 16 - read); if (r == -1) break; read += r; }
+            }
+            sIn.read(); // port byte 1
+            sIn.read(); // port byte 2
+
+            return upstream;
+        }
+
         private void handleClient(Socket client) {
             Socket upstreamSocks = null;
             try {
+                client.setTcpNoDelay(true);
+                client.setKeepAlive(true);
                 client.setSoTimeout(30000);
                 InputStream in = client.getInputStream();
                 OutputStream out = client.getOutputStream();
@@ -812,76 +1178,43 @@ public class MainActivity extends Activity {
                     }
                 }
 
-                upstreamSocks = new Socket();
-                upstreamSocks.connect(new InetSocketAddress(socksHost, socksPort), 15000);
-                upstreamSocks.setSoTimeout(30000);
+                int maxRetries = 3;
+                Exception lastError = null;
+                for (int attempt = 1; attempt <= maxRetries; attempt++) {
+                    try {
+                        upstreamSocks = connectAndHandshakeSocks(socksHost, socksPort, socksUser, socksPass, targetHost, targetPort, 8000);
+                        lastError = null;
+                        break;
+                    } catch (Exception e) {
+                        lastError = e;
+                        if (upstreamSocks != null) {
+                            try { upstreamSocks.close(); } catch (Exception ignored) {}
+                            upstreamSocks = null;
+                        }
+                        if (attempt < maxRetries) {
+                            try {
+                                Thread.sleep(200L * attempt);
+                            } catch (InterruptedException ie) {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (upstreamSocks == null) {
+                    Log.w(TAG, "Failed upstream SOCKS5 connection to " + targetHost + ":" + targetPort + " after " + maxRetries + " attempts: " + (lastError != null ? lastError.getMessage() : "unknown"));
+                    byte[] errBody = ("HTTP/1.1 502 Bad Gateway\r\n" +
+                            "Content-Type: text/plain; charset=utf-8\r\n" +
+                            "Connection: close\r\n\r\n" +
+                            "geminUp: SOCKS5 upstream connection failed after retries.\r\n").getBytes(StandardCharsets.UTF_8);
+                    out.write(errBody);
+                    out.flush();
+                    client.close();
+                    return;
+                }
 
                 InputStream sIn = upstreamSocks.getInputStream();
                 OutputStream sOut = upstreamSocks.getOutputStream();
-
-                boolean hasAuth = (socksUser != null && !socksUser.isEmpty());
-                if (hasAuth) {
-                    sOut.write(new byte[]{0x05, 0x02, 0x00, 0x02});
-                } else {
-                    sOut.write(new byte[]{0x05, 0x01, 0x00});
-                }
-                sOut.flush();
-
-                int sVer = sIn.read();
-                int sMethod = sIn.read();
-                if (sVer != 0x05) throw new RuntimeException("Invalid SOCKS5 version: " + sVer);
-
-                if (sMethod == 0x02 && hasAuth) {
-                    byte[] uBytes = socksUser.getBytes(StandardCharsets.UTF_8);
-                    byte[] pBytes = (socksPass != null ? socksPass : "").getBytes(StandardCharsets.UTF_8);
-                    byte[] authReq = new byte[3 + uBytes.length + pBytes.length];
-                    authReq[0] = 0x01;
-                    authReq[1] = (byte) uBytes.length;
-                    System.arraycopy(uBytes, 0, authReq, 2, uBytes.length);
-                    authReq[2 + uBytes.length] = (byte) pBytes.length;
-                    System.arraycopy(pBytes, 0, authReq, 3 + uBytes.length, pBytes.length);
-                    sOut.write(authReq);
-                    sOut.flush();
-
-                    int aVer = sIn.read();
-                    int aStatus = sIn.read();
-                    if (aStatus != 0x00) throw new RuntimeException("SOCKS5 Auth failed status: " + aStatus);
-                } else if (sMethod != 0x00) {
-                    throw new RuntimeException("SOCKS5 Unsupported auth method: " + sMethod);
-                }
-
-                byte[] hostBytes = targetHost.getBytes(StandardCharsets.UTF_8);
-                byte[] connReq = new byte[7 + hostBytes.length];
-                connReq[0] = 0x05;
-                connReq[1] = 0x01;
-                connReq[2] = 0x00;
-                connReq[3] = 0x03;
-                connReq[4] = (byte) hostBytes.length;
-                System.arraycopy(hostBytes, 0, connReq, 5, hostBytes.length);
-                connReq[5 + hostBytes.length] = (byte) ((targetPort >> 8) & 0xFF);
-                connReq[6 + hostBytes.length] = (byte) (targetPort & 0xFF);
-                sOut.write(connReq);
-                sOut.flush();
-
-                int cVer = sIn.read();
-                int cRep = sIn.read();
-                sIn.read();
-                int cAtyp = sIn.read();
-                if (cRep != 0x00) throw new RuntimeException("SOCKS5 Connect rejected code: " + cRep);
-
-                if (cAtyp == 0x01) {
-                    byte[] ip = new byte[4];
-                    sIn.read(ip);
-                } else if (cAtyp == 0x03) {
-                    int dLen = sIn.read();
-                    byte[] d = new byte[dLen];
-                    sIn.read(d);
-                } else if (cAtyp == 0x04) {
-                    byte[] ip6 = new byte[16];
-                    sIn.read(ip6);
-                }
-                sIn.read();
-                sIn.read();
 
                 if (method.equals("CONNECT")) {
                     out.write("HTTP/1.1 200 Connection Established\r\n\r\n".getBytes(StandardCharsets.UTF_8));
@@ -900,7 +1233,7 @@ public class MainActivity extends Activity {
                 t1.start();
                 t2.start();
             } catch (Exception e) {
-                Log.w(TAG, "Local bridge connection failed.", e);
+                Log.w(TAG, "Local bridge client handler error.", e);
                 try {
                     if (client != null) client.close();
                 } catch (Exception closeError) {
