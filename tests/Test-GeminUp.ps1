@@ -235,9 +235,11 @@ try {
 finally {
     if ($null -ne $transportProcess -and -not $transportProcess.HasExited) {
         Stop-Process -Id $transportProcess.Id -Force -ErrorAction SilentlyContinue
+        $transportProcess.WaitForExit(5000) | Out-Null
     }
     if ($null -ne $socksProcess -and -not $socksProcess.HasExited) {
         Stop-Process -Id $socksProcess.Id -Force -ErrorAction SilentlyContinue
+        $socksProcess.WaitForExit(5000) | Out-Null
     }
     if (Test-Path -LiteralPath $resolvedTestRoot) {
         Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force
