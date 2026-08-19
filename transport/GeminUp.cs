@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
@@ -233,17 +234,16 @@ namespace GeminUp
     {
         private const int TimeoutMs = 15000;
 
-        public static TcpClient Connect(ProxyDefinition proxy, string targetHost, int targetPort)
+        public static async Task<TcpClient> ConnectAsync(ProxyDefinition proxy, string targetHost, int targetPort)
         {
             TcpClient client = new TcpClient();
             client.NoDelay = true;
-            client.ReceiveTimeout = TimeoutMs;
-            client.SendTimeout = TimeoutMs;
             try
             {
                 try
                 {
-                    ConnectWithTimeout(client, proxy.Host, proxy.Port, TimeoutMs);
+                    await AsyncIo.WithTimeout(client.ConnectAsync(proxy.Host, proxy.Port), TimeoutMs,
+                        "Connection timed out.").ConfigureAwait(false);
                 }
                 catch (Exception error)
                 {
@@ -254,8 +254,9 @@ namespace GeminUp
                 byte[] greeting = hasCredentials
                     ? new byte[] { 0x05, 0x02, 0x00, 0x02 }
                     : new byte[] { 0x05, 0x01, 0x00 };
-                stream.Write(greeting, 0, greeting.Length);
-                byte[] methodReply = ReadExact(stream, 2);
+                await AsyncIo.WithTimeout(stream.WriteAsync(greeting, 0, greeting.Length), TimeoutMs,
+                    "SOCKS5 greeting timed out.").ConfigureAwait(false);
+                byte[] methodReply = await ReadExactAsync(stream, 2).ConfigureAwait(false);
                 if (methodReply[0] != 0x05 || methodReply[1] == 0xff)
                     throw new IOException("SOCKS5 proxy rejected all authentication methods.");
 
@@ -269,11 +270,18 @@ namespace GeminUp
                     Buffer.BlockCopy(username, 0, auth, 2, username.Length);
                     auth[2 + username.Length] = (byte)password.Length;
                     Buffer.BlockCopy(password, 0, auth, 3 + username.Length, password.Length);
-                    stream.Write(auth, 0, auth.Length);
-                    Array.Clear(auth, 0, auth.Length);
-                    Array.Clear(username, 0, username.Length);
-                    Array.Clear(password, 0, password.Length);
-                    byte[] authReply = ReadExact(stream, 2);
+                    try
+                    {
+                        await AsyncIo.WithTimeout(stream.WriteAsync(auth, 0, auth.Length), TimeoutMs,
+                            "SOCKS5 authentication timed out.").ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        Array.Clear(auth, 0, auth.Length);
+                        Array.Clear(username, 0, username.Length);
+                        Array.Clear(password, 0, password.Length);
+                    }
+                    byte[] authReply = await ReadExactAsync(stream, 2).ConfigureAwait(false);
                     if (authReply[0] != 0x01 || authReply[1] != 0x00)
                         throw new IOException("SOCKS5 username/password authentication failed.");
                 }
@@ -294,12 +302,13 @@ namespace GeminUp
                 Buffer.BlockCopy(hostBytes, 0, request, 5, hostBytes.Length);
                 request[5 + hostBytes.Length] = (byte)((targetPort >> 8) & 0xff);
                 request[6 + hostBytes.Length] = (byte)(targetPort & 0xff);
-                stream.Write(request, 0, request.Length);
+                await AsyncIo.WithTimeout(stream.WriteAsync(request, 0, request.Length), TimeoutMs,
+                    "SOCKS5 CONNECT request timed out.").ConfigureAwait(false);
 
-                byte[] reply = ReadExact(stream, 4);
+                byte[] reply = await ReadExactAsync(stream, 4).ConfigureAwait(false);
                 if (reply[0] != 0x05 || reply[1] != 0x00)
                     throw new IOException("SOCKS5 CONNECT failed with status " + reply[1].ToString(CultureInfo.InvariantCulture) + ".");
-                ConsumeBoundAddress(stream, reply[3]);
+                await ConsumeBoundAddressAsync(stream, reply[3]).ConfigureAwait(false);
                 return client;
             }
             catch
@@ -309,45 +318,72 @@ namespace GeminUp
             }
         }
 
-        private static void ConnectWithTimeout(TcpClient client, string host, int port, int timeoutMs)
-        {
-            IAsyncResult result = client.BeginConnect(host, port, null, null);
-            try
-            {
-                if (!result.AsyncWaitHandle.WaitOne(timeoutMs))
-                    throw new TimeoutException("Connection timed out.");
-                client.EndConnect(result);
-            }
-            finally
-            {
-                result.AsyncWaitHandle.Close();
-            }
-        }
-
-        private static byte[] ReadExact(Stream stream, int count)
+        private static async Task<byte[]> ReadExactAsync(Stream stream, int count)
         {
             byte[] buffer = new byte[count];
             int offset = 0;
             while (offset < count)
             {
-                int read = stream.Read(buffer, offset, count - offset);
+                int read = await AsyncIo.WithTimeout(stream.ReadAsync(buffer, offset, count - offset), TimeoutMs,
+                    "SOCKS5 response timed out.").ConfigureAwait(false);
                 if (read <= 0) throw new EndOfStreamException("SOCKS5 proxy closed the connection unexpectedly.");
                 offset += read;
             }
             return buffer;
         }
 
-        private static void ConsumeBoundAddress(Stream stream, byte addressType)
+        private static async Task ConsumeBoundAddressAsync(Stream stream, byte addressType)
         {
-            if (addressType == 0x01) ReadExact(stream, 4);
-            else if (addressType == 0x04) ReadExact(stream, 16);
+            if (addressType == 0x01) await ReadExactAsync(stream, 4).ConfigureAwait(false);
+            else if (addressType == 0x04) await ReadExactAsync(stream, 16).ConfigureAwait(false);
             else if (addressType == 0x03)
             {
-                int length = ReadExact(stream, 1)[0];
-                ReadExact(stream, length);
+                int length = (await ReadExactAsync(stream, 1).ConfigureAwait(false))[0];
+                await ReadExactAsync(stream, length).ConfigureAwait(false);
             }
             else throw new IOException("SOCKS5 proxy returned an unknown address type.");
-            ReadExact(stream, 2);
+            await ReadExactAsync(stream, 2).ConfigureAwait(false);
+        }
+    }
+
+    internal static class AsyncIo
+    {
+        public static async Task WithTimeout(Task operation, int timeoutMs, string message)
+        {
+            using (CancellationTokenSource timer = new CancellationTokenSource())
+            {
+                Task delay = Task.Delay(timeoutMs, timer.Token);
+                if (await Task.WhenAny(operation, delay).ConfigureAwait(false) != operation)
+                {
+                    Observe(operation);
+                    throw new TimeoutException(message);
+                }
+                timer.Cancel();
+                await operation.ConfigureAwait(false);
+            }
+        }
+
+        public static async Task<T> WithTimeout<T>(Task<T> operation, int timeoutMs, string message)
+        {
+            using (CancellationTokenSource timer = new CancellationTokenSource())
+            {
+                Task delay = Task.Delay(timeoutMs, timer.Token);
+                if (await Task.WhenAny(operation, delay).ConfigureAwait(false) != operation)
+                {
+                    Observe(operation);
+                    throw new TimeoutException(message);
+                }
+                timer.Cancel();
+                return await operation.ConfigureAwait(false);
+            }
+        }
+
+        private static void Observe(Task operation)
+        {
+            operation.ContinueWith(task =>
+            {
+                Exception ignored = task.Exception;
+            }, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
         }
     }
 
@@ -401,6 +437,7 @@ namespace GeminUp
     internal sealed class LocalTransport
     {
         private const int MaxHeaderBytes = 65536;
+        private const int ClientIoTimeoutMs = 30000;
         private readonly TransportConfig config;
         private readonly ProxyDefinition upstream;
         private readonly RouteMatcher matcher;
@@ -418,30 +455,55 @@ namespace GeminUp
 
         public void Run()
         {
+            RunAsync().GetAwaiter().GetResult();
+        }
+
+        private async Task RunAsync()
+        {
             listener = new TcpListener(IPAddress.Loopback, config.ListenPort);
             listener.Start(256);
             logger.Write("OK", "Transport listening on 127.0.0.1:" + config.ListenPort.ToString(CultureInfo.InvariantCulture) + ".");
             while (true)
             {
-                TcpClient client = listener.AcceptTcpClient();
-                slots.Wait();
-                Task.Run(() =>
+                await slots.WaitAsync().ConfigureAwait(false);
+                TcpClient client = null;
+                try
                 {
-                    try { HandleClient(client); }
-                    catch (Exception error) { logger.Write("WARN", "Client connection failed: " + error.Message); }
-                    finally { client.Close(); slots.Release(); }
-                });
+                    client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
+                    Task handler = HandleClientAndReleaseAsync(client);
+                }
+                catch
+                {
+                    if (client != null) client.Close();
+                    slots.Release();
+                    throw;
+                }
             }
         }
 
-        private void HandleClient(TcpClient client)
+        private async Task HandleClientAndReleaseAsync(TcpClient client)
+        {
+            try
+            {
+                await HandleClientAsync(client).ConfigureAwait(false);
+            }
+            catch (Exception error)
+            {
+                logger.Write("WARN", "Client connection failed: " + error.Message);
+            }
+            finally
+            {
+                client.Close();
+                slots.Release();
+            }
+        }
+
+        private async Task HandleClientAsync(TcpClient client)
         {
             client.NoDelay = true;
-            client.ReceiveTimeout = 30000;
-            client.SendTimeout = 30000;
             NetworkStream clientStream = client.GetStream();
-            byte[] headerBytes = ReadHeaders(clientStream);
-            string headerText = Encoding.GetEncoding("ISO-8859-1").GetString(headerBytes);
+            HeaderReadResult request = await ReadHeadersAsync(clientStream).ConfigureAwait(false);
+            string headerText = Encoding.GetEncoding("ISO-8859-1").GetString(request.Headers);
             string[] lines = headerText.Split(new[] { "\r\n" }, StringSplitOptions.None);
             if (lines.Length == 0) throw new InvalidDataException("Empty HTTP proxy request.");
             string[] requestParts = lines[0].Split(new[] { ' ' }, 3);
@@ -455,19 +517,35 @@ namespace GeminUp
             {
                 ParseAuthority(requestParts[1], 443, out host, out port);
                 bool throughSocks = matcher.UsesSocks(host);
+                Exception openError = null;
                 try
                 {
-                    target = OpenTarget(host, port, throughSocks);
+                    target = await OpenTargetAsync(host, port, throughSocks).ConfigureAwait(false);
                 }
                 catch (Exception error)
                 {
-                    if (throughSocks) logger.Write("ERROR", "Protected route unavailable for " + host + ": " + error.Message);
-                    SendProxyError(clientStream, throughSocks, error.Message);
+                    target = null;
+                    openError = error;
+                }
+                if (openError != null)
+                {
+                    if (throughSocks) logger.Write("ERROR", "Protected route unavailable for " + host + ": " + openError.Message);
+                    await SendProxyErrorAsync(clientStream, throughSocks, openError.Message).ConfigureAwait(false);
                     return;
                 }
-                byte[] established = Encoding.ASCII.GetBytes("HTTP/1.1 200 Connection Established\r\nProxy-Agent: geminUp/1.1\r\n\r\n");
-                clientStream.Write(established, 0, established.Length);
-                Relay(client, target);
+                using (target)
+                {
+                    byte[] established = Encoding.ASCII.GetBytes("HTTP/1.1 200 Connection Established\r\nProxy-Agent: geminUp/1.3\r\n\r\n");
+                    await AsyncIo.WithTimeout(clientStream.WriteAsync(established, 0, established.Length),
+                        ClientIoTimeoutMs, "Client response timed out.").ConfigureAwait(false);
+                    if (request.Trailing.Length > 0)
+                    {
+                        NetworkStream targetStream = target.GetStream();
+                        await AsyncIo.WithTimeout(targetStream.WriteAsync(request.Trailing, 0, request.Trailing.Length),
+                            ClientIoTimeoutMs, "Initial tunnel write timed out.").ConfigureAwait(false);
+                    }
+                    await RelayAsync(client, target).ConfigureAwait(false);
+                }
                 return;
             }
 
@@ -480,66 +558,86 @@ namespace GeminUp
             host = destination.Host;
             port = destination.IsDefaultPort ? (destination.Scheme == "https" ? 443 : 80) : destination.Port;
             bool proxyRoute = matcher.UsesSocks(host);
+            Exception routeError = null;
             try
             {
-                target = OpenTarget(host, port, proxyRoute);
+                target = await OpenTargetAsync(host, port, proxyRoute).ConfigureAwait(false);
             }
             catch (Exception error)
             {
-                if (proxyRoute) logger.Write("ERROR", "Protected route unavailable for " + host + ": " + error.Message);
-                SendProxyError(clientStream, proxyRoute, error.Message);
+                target = null;
+                routeError = error;
+            }
+            if (routeError != null)
+            {
+                if (proxyRoute) logger.Write("ERROR", "Protected route unavailable for " + host + ": " + routeError.Message);
+                await SendProxyErrorAsync(clientStream, proxyRoute, routeError.Message).ConfigureAwait(false);
                 return;
             }
 
-            string path = string.IsNullOrEmpty(destination.PathAndQuery) ? "/" : destination.PathAndQuery;
-            lines[0] = method + " " + path + " " + requestParts[2];
-            string rewritten = string.Join("\r\n", lines.Where(line =>
-                !line.StartsWith("Proxy-Connection:", StringComparison.OrdinalIgnoreCase)));
-            byte[] outgoingHeader = Encoding.GetEncoding("ISO-8859-1").GetBytes(rewritten);
-            NetworkStream targetStream = target.GetStream();
-            targetStream.Write(outgoingHeader, 0, outgoingHeader.Length);
-            Relay(client, target);
+            using (target)
+            {
+                string path = string.IsNullOrEmpty(destination.PathAndQuery) ? "/" : destination.PathAndQuery;
+                lines[0] = method + " " + path + " " + requestParts[2];
+                string rewritten = string.Join("\r\n", lines.Where(line =>
+                    !line.StartsWith("Proxy-Connection:", StringComparison.OrdinalIgnoreCase)));
+                byte[] outgoingHeader = Encoding.GetEncoding("ISO-8859-1").GetBytes(rewritten);
+                NetworkStream targetStream = target.GetStream();
+                await AsyncIo.WithTimeout(targetStream.WriteAsync(outgoingHeader, 0, outgoingHeader.Length),
+                    ClientIoTimeoutMs, "HTTP request write timed out.").ConfigureAwait(false);
+                if (request.Trailing.Length > 0)
+                {
+                    await AsyncIo.WithTimeout(targetStream.WriteAsync(request.Trailing, 0, request.Trailing.Length),
+                        ClientIoTimeoutMs, "HTTP request body write timed out.").ConfigureAwait(false);
+                }
+                await RelayAsync(client, target).ConfigureAwait(false);
+            }
         }
 
-        private TcpClient OpenTarget(string host, int port, bool throughSocks)
+        private async Task<TcpClient> OpenTargetAsync(string host, int port, bool throughSocks)
         {
-            if (throughSocks) return Socks5Connector.Connect(upstream, host, port);
+            if (throughSocks) return await Socks5Connector.ConnectAsync(upstream, host, port).ConfigureAwait(false);
             TcpClient direct = new TcpClient();
             direct.NoDelay = true;
-            direct.ReceiveTimeout = 30000;
-            direct.SendTimeout = 30000;
             try
             {
-                IAsyncResult result = direct.BeginConnect(host, port, null, null);
-                try
-                {
-                    if (!result.AsyncWaitHandle.WaitOne(15000)) throw new TimeoutException("Direct connection timed out.");
-                    direct.EndConnect(result);
-                }
-                finally { result.AsyncWaitHandle.Close(); }
+                await AsyncIo.WithTimeout(direct.ConnectAsync(host, port), 15000,
+                    "Direct connection timed out.").ConfigureAwait(false);
                 return direct;
             }
             catch { direct.Close(); throw; }
         }
 
-        private static byte[] ReadHeaders(Stream stream)
+        private static async Task<HeaderReadResult> ReadHeadersAsync(Stream stream)
         {
             MemoryStream buffer = new MemoryStream();
-            int matched = 0;
-            byte[] marker = new byte[] { 13, 10, 13, 10 };
-            while (buffer.Length < MaxHeaderBytes)
+            byte[] chunk = new byte[4096];
+            while (true)
             {
-                int value = stream.ReadByte();
-                if (value < 0) throw new EndOfStreamException("Client closed before sending HTTP headers.");
-                buffer.WriteByte((byte)value);
-                if (value == marker[matched])
+                int previousLength = checked((int)buffer.Length);
+                int read = await AsyncIo.WithTimeout(stream.ReadAsync(chunk, 0, chunk.Length), ClientIoTimeoutMs,
+                    "Client HTTP headers timed out.").ConfigureAwait(false);
+                if (read <= 0) throw new EndOfStreamException("Client closed before sending HTTP headers.");
+                buffer.Write(chunk, 0, read);
+                byte[] bytes = buffer.GetBuffer();
+                int totalLength = checked((int)buffer.Length);
+                for (int index = Math.Max(0, previousLength - 3); index <= totalLength - 4; index++)
                 {
-                    matched++;
-                    if (matched == marker.Length) return buffer.ToArray();
+                    if (bytes[index] != 13 || bytes[index + 1] != 10 ||
+                        bytes[index + 2] != 13 || bytes[index + 3] != 10) continue;
+                    int headerLength = index + 4;
+                    if (headerLength > MaxHeaderBytes)
+                        throw new InvalidDataException("HTTP proxy headers exceed 64 KiB.");
+                    byte[] headers = new byte[headerLength];
+                    Buffer.BlockCopy(bytes, 0, headers, 0, headerLength);
+                    byte[] trailing = new byte[totalLength - headerLength];
+                    if (trailing.Length > 0)
+                        Buffer.BlockCopy(bytes, headerLength, trailing, 0, trailing.Length);
+                    return new HeaderReadResult(headers, trailing);
                 }
-                else matched = value == marker[0] ? 1 : 0;
+                if (totalLength >= MaxHeaderBytes)
+                    throw new InvalidDataException("HTTP proxy headers exceed 64 KiB.");
             }
-            throw new InvalidDataException("HTTP proxy headers exceed 64 KiB.");
         }
 
         private static void ParseAuthority(string authority, int defaultPort, out string host, out int port)
@@ -551,7 +649,7 @@ namespace GeminUp
             port = uri.IsDefaultPort ? defaultPort : uri.Port;
         }
 
-        private static void SendProxyError(Stream stream, bool protectedRoute, string reason)
+        private static async Task SendProxyErrorAsync(Stream stream, bool protectedRoute, string reason)
         {
             string title = protectedRoute ? "Gemini proxy offline" : "Network connection failed";
             string safeReason = WebUtility.HtmlEncode(reason ?? "Unknown error");
@@ -564,19 +662,64 @@ namespace GeminUp
                              "Content-Length: " + bodyBytes.Length.ToString(CultureInfo.InvariantCulture) +
                              "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(headers);
-            stream.Write(headerBytes, 0, headerBytes.Length);
-            stream.Write(bodyBytes, 0, bodyBytes.Length);
+            await AsyncIo.WithTimeout(stream.WriteAsync(headerBytes, 0, headerBytes.Length), ClientIoTimeoutMs,
+                "Client error response timed out.").ConfigureAwait(false);
+            await AsyncIo.WithTimeout(stream.WriteAsync(bodyBytes, 0, bodyBytes.Length), ClientIoTimeoutMs,
+                "Client error response timed out.").ConfigureAwait(false);
         }
 
-        private static void Relay(TcpClient left, TcpClient right)
+        private static async Task RelayAsync(TcpClient left, TcpClient right)
         {
-            using (right)
+            NetworkStream leftStream = left.GetStream();
+            NetworkStream rightStream = right.GetStream();
+            Task leftToRight = leftStream.CopyToAsync(rightStream, 81920);
+            Task rightToLeft = rightStream.CopyToAsync(leftStream, 81920);
+            Exception relayError = null;
+            try
             {
-                NetworkStream leftStream = left.GetStream();
-                NetworkStream rightStream = right.GetStream();
-                Task leftToRight = leftStream.CopyToAsync(rightStream, 81920);
-                Task rightToLeft = rightStream.CopyToAsync(leftStream, 81920);
-                Task.WaitAny(leftToRight, rightToLeft);
+                Task completed = await Task.WhenAny(leftToRight, rightToLeft).ConfigureAwait(false);
+                await completed.ConfigureAwait(false);
+                if (completed == leftToRight)
+                {
+                    TryShutdown(right, SocketShutdown.Send);
+                    await rightToLeft.ConfigureAwait(false);
+                }
+                else
+                {
+                    TryShutdown(left, SocketShutdown.Send);
+                    await leftToRight.ConfigureAwait(false);
+                }
+            }
+            catch (Exception error)
+            {
+                relayError = error;
+            }
+            if (relayError != null)
+            {
+                TryShutdown(left, SocketShutdown.Both);
+                TryShutdown(right, SocketShutdown.Both);
+                try { await Task.WhenAll(leftToRight, rightToLeft).ConfigureAwait(false); }
+                catch { }
+                ExceptionDispatchInfo.Capture(relayError).Throw();
+            }
+        }
+
+        private static void TryShutdown(TcpClient client, SocketShutdown direction)
+        {
+            try { client.Client.Shutdown(direction); }
+            catch (SocketException) { }
+            catch (ObjectDisposedException) { }
+        }
+
+        private sealed class HeaderReadResult
+        {
+            public readonly byte[] Headers;
+            public readonly byte[] Trailing;
+
+            public HeaderReadResult(byte[] headers, byte[] trailing)
+            {
+                Headers = headers;
+                Trailing = trailing;
             }
         }
     }
@@ -747,7 +890,7 @@ namespace GeminUp
 
         private static void VerifyProxy(ProxyDefinition proxy)
         {
-            using (TcpClient client = Socks5Connector.Connect(proxy, "gemini.google.com", 443))
+            using (TcpClient client = Socks5Connector.ConnectAsync(proxy, "gemini.google.com", 443).GetAwaiter().GetResult())
             using (SslStream tls = new SslStream(client.GetStream(), false))
             {
                 tls.ReadTimeout = 15000;

@@ -7,7 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TransportVersion = '1.2.0'
+$script:TransportVersion = '1.3.0'
 $script:TaskName = 'geminUp'
 $script:ListenPort = 8877
 $script:InstallRoot = Join-Path $env:ProgramData 'geminUp'

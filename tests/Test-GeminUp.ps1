@@ -18,6 +18,8 @@ if (-not $resolvedTestRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIg
 
 $transportProcess = $null
 $socksProcess = $null
+$holdProcess = $null
+$holdClients = [Collections.Generic.List[Net.Sockets.TcpClient]]::new()
 
 function Get-FreeTcpPort {
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -126,6 +128,41 @@ function Invoke-ConnectProbe {
     }
 }
 
+function Open-HoldTunnel {
+    param([int]$TargetPort, [int]$ProxyPort)
+
+    $client = [Net.Sockets.TcpClient]::new()
+    try {
+        $client.ReceiveTimeout = 10000
+        $client.SendTimeout = 10000
+        $client.Connect('127.0.0.1', $ProxyPort)
+        $stream = $client.GetStream()
+        $request = [Text.Encoding]::ASCII.GetBytes(
+            "CONNECT 127.0.0.1:${TargetPort} HTTP/1.1`r`nHost: 127.0.0.1:${TargetPort}`r`n`r`n")
+        $stream.Write($request, 0, $request.Length)
+        $response = [IO.MemoryStream]::new()
+        $matched = 0
+        $marker = [byte[]](13, 10, 13, 10)
+        while ($response.Length -lt 4096 -and $matched -lt $marker.Length) {
+            $value = $stream.ReadByte()
+            if ($value -lt 0) { throw 'Transport closed a concurrency-test tunnel during setup.' }
+            $response.WriteByte([byte]$value)
+            if ($value -eq $marker[$matched]) { $matched++ }
+            else { $matched = $(if ($value -eq $marker[0]) { 1 } else { 0 }) }
+        }
+        $status = [Text.Encoding]::ASCII.GetString($response.ToArray())
+        $response.Dispose()
+        if ($matched -ne $marker.Length -or -not $status.StartsWith('HTTP/1.1 200 ')) {
+            throw "Transport rejected a concurrency-test tunnel: $status"
+        }
+        return $client
+    }
+    catch {
+        $client.Close()
+        throw
+    }
+}
+
 try {
     New-Item -ItemType Directory -Path $resolvedTestRoot -Force | Out-Null
 
@@ -189,6 +226,16 @@ internal static class AntigravityProbe
     if ($null -eq $python) {
         throw 'Python 3 is required for integration tests only.'
     }
+
+    $holdPort = Get-FreeTcpPort
+    $holdStdout = Join-Path $resolvedTestRoot 'hold-stdout.log'
+    $holdStderr = Join-Path $resolvedTestRoot 'hold-stderr.log'
+    $holdProcess = Start-Process -FilePath $python.Source -ArgumentList @(
+        $([char]34 + (Join-Path $PSScriptRoot 'hold_open_server.py') + [char]34),
+        '--port', $holdPort
+    ) -RedirectStandardOutput $holdStdout -RedirectStandardError $holdStderr `
+        -WindowStyle Hidden -PassThru
+    Wait-TcpPort -Port $holdPort
 
     $socksPort = Get-FreeTcpPort
     $socksStdout = Join-Path $resolvedTestRoot 'socks-stdout.log'
@@ -260,6 +307,19 @@ internal static class AntigravityProbe
         throw "Antigravity language-server endpoint did not enter SOCKS route. Routes: $($routes -join '; ')"
     }
 
+    $baselineThreads = (Get-Process -Id $transportProcess.Id).Threads.Count
+    foreach ($index in 1..96) {
+        $holdClients.Add((Open-HoldTunnel -TargetPort $holdPort -ProxyPort $transportPort))
+    }
+    Start-Sleep -Seconds 2
+    $loadedProcess = Get-Process -Id $transportProcess.Id
+    if ($loadedProcess.Threads.Count -gt ($baselineThreads + 16)) {
+        throw "Async concurrency regression: 96 idle tunnels increased transport threads from $baselineThreads to $($loadedProcess.Threads.Count)."
+    }
+    Write-Host "OK: 96 concurrent idle tunnels used $($loadedProcess.Threads.Count) transport threads (baseline $baselineThreads)."
+    foreach ($holdClient in $holdClients) { $holdClient.Close() }
+    $holdClients.Clear()
+
     $probeOutput = Join-Path $resolvedTestRoot 'antigravity-launcher-probe.txt'
     $originalArguments = '"{0}" --original-flag' -f $probeOutput.Replace('"', '\"')
     $argumentBytes = [Text.UTF8Encoding]::new($false).GetBytes($originalArguments)
@@ -315,9 +375,10 @@ internal static class AntigravityProbe
         throw "Gemini did not fail closed when SOCKS5 went offline: curl=$($geminiOffline.ExitCode), HTTP=$($geminiOffline.Code)."
     }
 
-    Write-Host 'SUCCESS: compile, routing, process-scoped Antigravity launcher and fail-closed checks passed.' -ForegroundColor Green
+    Write-Host 'SUCCESS: compile, async concurrency, routing, process-scoped Antigravity launcher and fail-closed checks passed.' -ForegroundColor Green
 }
 finally {
+    foreach ($holdClient in $holdClients) { $holdClient.Close() }
     if ($null -ne $transportProcess -and -not $transportProcess.HasExited) {
         Stop-Process -Id $transportProcess.Id -Force -ErrorAction SilentlyContinue
         $transportProcess.WaitForExit(5000) | Out-Null
@@ -325,6 +386,10 @@ finally {
     if ($null -ne $socksProcess -and -not $socksProcess.HasExited) {
         Stop-Process -Id $socksProcess.Id -Force -ErrorAction SilentlyContinue
         $socksProcess.WaitForExit(5000) | Out-Null
+    }
+    if ($null -ne $holdProcess -and -not $holdProcess.HasExited) {
+        Stop-Process -Id $holdProcess.Id -Force -ErrorAction SilentlyContinue
+        $holdProcess.WaitForExit(5000) | Out-Null
     }
     if (Test-Path -LiteralPath $resolvedTestRoot) {
         Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force
