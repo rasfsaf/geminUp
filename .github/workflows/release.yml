@@ -17,6 +17,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Verify release version
+        shell: powershell
+        run: |
+          $controller = Get-Content geminUp.ps1 -Raw -Encoding UTF8
+          if ($controller -notmatch '(?m)^\$script:TransportVersion = ''([^'']+)''\r?$') {
+            throw 'Cannot read TransportVersion from geminUp.ps1.'
+          }
+          $expectedTag = "v$($Matches[1])"
+          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
+            throw "Release tag '$env:GITHUB_REF_NAME' does not match transport version '$expectedTag'."
+          }
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -38,7 +50,7 @@ jobs:
           $stage = Join-Path $PWD 'artifacts\geminUp'
           New-Item -ItemType Directory -Path (Join-Path $stage 'transport') -Force | Out-Null
           Copy-Item geminUp.bat,geminUp-bootstrap.bat,geminUp.ps1,README.md,SECURITY.md,LICENSE -Destination $stage
-          Copy-Item transport\GeminUp.cs,transport\domains.txt -Destination (Join-Path $stage 'transport')
+          Copy-Item transport\GeminUp.cs,transport\domains.txt,transport\youtube-domains.txt -Destination (Join-Path $stage 'transport')
           Compress-Archive -Path $stage -DestinationPath artifacts\geminUp.zip -CompressionLevel Optimal
           $hash = (Get-FileHash artifacts\geminUp.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           [IO.File]::WriteAllText(
