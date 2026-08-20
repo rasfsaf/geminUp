@@ -1,0 +1,15 @@
+# YouTube web, Music, Shorts and embedded players
+*.youtube.com
+*.youtu.be
+*.youtube-nocookie.com
+*.youtubeeducation.com
+
+# YouTube media, thumbnails and profile images
+*.googlevideo.com
+*.ytimg.com
+yt3.ggpht.com
+
+# YouTube application APIs
+youtube.googleapis.com
+youtubei.googleapis.com
+youtubeembeddedplayer.googleapis.com

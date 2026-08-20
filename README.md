@@ -11,7 +11,7 @@ Android-приложение не является VPN и не перехват�
 
 ## Возможности
 
-- один BAT с меню включения, замены SOCKS5, применения обновления и полного отключения;
+- один BAT с меню включения, замены SOCKS5, опциональной маршрутизации YouTube, применения обновления и полного отключения;
 - единая установка для всех пользователей компьютера;
 - автозапуск фонового транспорта от `SYSTEM` при старте Windows;
 - удалённое разрешение DNS для защищённых направлений через SOCKS5;
@@ -64,7 +64,10 @@ Android-приложение не является VPN и не перехват�
 2. Change SOCKS5
 3. Disable and remove from autostart
 4. Apply downloaded update and restart
+5. Enable YouTube routing
 ```
+
+Пункт 5 переключается между `Enable YouTube routing` и `Disable YouTube routing`. Настройка по умолчанию выключена, сохраняется между обновлениями и применяется без повторного ввода SOCKS5. После переключения полностью перезапусти открытые браузеры, чтобы они закрыли старые соединения.
 
 Поддерживаются форматы:
 
@@ -88,7 +91,7 @@ socks5://username:password@host:port
 3. выбери пункт `4. Apply downloaded update and restart`;
 4. полностью закрой и заново открой Antigravity и браузеры.
 
-Пункт 4 не просит повторно вводить SOCKS5: он пересобирает EXE, перечитывает `transport/domains.txt`, переустанавливает задачу автозапуска, обновляет ярлыки Antigravity и перезапускает transport с уже сохранённой DPAPI-конфигурацией.
+Пункт 4 не просит повторно вводить SOCKS5: он пересобирает EXE, перечитывает `transport/domains.txt` и, если включён YouTube, `transport/youtube-domains.txt`, переустанавливает задачу автозапуска, обновляет ярлыки Antigravity и перезапускает transport с уже сохранённой DPAPI-конфигурацией.
 
 ## Как устроена маршрутизация Windows
 
@@ -99,11 +102,12 @@ flowchart LR
     A["Браузер через Windows proxy"] --> B["geminUp 127.0.0.1:8877"]
     AG["Antigravity launcher"] --> B
     B -->|"Gemini / Antigravity hostname"| C["SOCKS5 + удалённый DNS"]
+    B -->|"YouTube hostname, если опция включена"| C
     B -->|"Остальной hostname"| D["Текущий Windows route / VPN"]
-    C --> E["Google Gemini"]
+    C --> E["Google Gemini / YouTube"]
 ```
 
-Маршруты задаются в [`transport/domains.txt`](transport/domains.txt). Широких масок `*.google.com`, YouTube, `googlevideo.com` и `ytimg.com` там нет. Общие зависимости вроде `accounts.google.*`, `gstatic` и `googleusercontent` могут использоваться другими продуктами Google: различить продукты внутри одного hostname невозможно.
+Обязательные маршруты задаются в [`transport/domains.txt`](transport/domains.txt), а опциональные YouTube-маршруты — в [`transport/youtube-domains.txt`](transport/youtube-domains.txt). YouTube-опция покрывает основной сайт, Music, Shorts, встроенные плееры, API, `googlevideo.com` и `ytimg.com`. Широкой маски `*.google.com` нет. Общие зависимости вроде `accounts.google.*`, `gstatic` и `googleusercontent` могут использоваться другими продуктами Google: различить продукты внутри одного hostname невозможно.
 
 При недоступности SOCKS5 только защищённый маршрут блокируется без прямого соединения. Если завершится сам локальный процесс, приложения с системным proxy могут временно потерять весь доступ до автоматического перезапуска задачи.
 
@@ -178,6 +182,7 @@ geminUp.bat
 geminUp.ps1
 transport/GeminUp.cs
 transport/domains.txt
+transport/youtube-domains.txt
 geminUp.apk
 android/
 ```
@@ -188,7 +193,7 @@ Python нужен только интеграционному тесту и не
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Test-GeminUp.ps1
 ```
 
-Тест компилирует ядро, поднимает loopback SOCKS5, проверяет direct-route, Gemini-route, endpoint языка Antigravity, наследование proxy только дочерним процессом launcher и fail-closed. Он не меняет реальные ярлыки, системный proxy, registry или Scheduled Tasks.
+Тест компилирует ядро, поднимает loopback SOCKS5, проверяет direct-route, маршруты Gemini и YouTube, endpoint языка Antigravity, наследование proxy только дочерним процессом launcher и fail-closed. Он не меняет реальные ярлыки, системный proxy, registry или Scheduled Tasks.
 
 Android собирается фиксированным Gradle Wrapper без системного Gradle:
 

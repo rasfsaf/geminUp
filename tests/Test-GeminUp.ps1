@@ -8,6 +8,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $ProgressPreference = 'SilentlyContinue'
 $sourcePath = Join-Path $projectRoot 'transport\GeminUp.cs'
 $domainsPath = Join-Path $projectRoot 'transport\domains.txt'
+$youtubeDomainsPath = Join-Path $projectRoot 'transport\youtube-domains.txt'
 $controllerPath = Join-Path $projectRoot 'geminUp.ps1'
 $testRoot = Join-Path $env:TEMP ('geminUp-tests-' + [Guid]::NewGuid().ToString('N'))
 $tempPrefix = [IO.Path]::GetFullPath($env:TEMP).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
@@ -249,14 +250,40 @@ internal static class AntigravityProbe
 
     $configPath = Join-Path $resolvedTestRoot 'config.json'
     Invoke-Configure -Executable $executable -ConfigPath $configPath -SocksPort $socksPort
-    $refreshOutput = & $executable refresh-domains --config $configPath --domains $domainsPath 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Domain refresh failed: $($refreshOutput -join [Environment]::NewLine)"
+
+    $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (@($config.ProxyPatterns) -match 'youtube|youtu\.be|googlevideo|ytimg') {
+        throw 'YouTube routing must be disabled in the default domain configuration.'
     }
+
+    $effectiveDomainsPath = Join-Path $resolvedTestRoot 'domains-with-youtube.txt'
+    $effectiveDomains = @(
+        Get-Content -LiteralPath $domainsPath -Encoding UTF8
+        Get-Content -LiteralPath $youtubeDomainsPath -Encoding UTF8
+    )
+    [IO.File]::WriteAllLines(
+        $effectiveDomainsPath,
+        [string[]]$effectiveDomains,
+        [Text.UTF8Encoding]::new($false))
+    try {
+        $refreshOutput = & $executable refresh-domains --config $configPath --domains $effectiveDomainsPath 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Domain refresh failed: $($refreshOutput -join [Environment]::NewLine)"
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $effectiveDomainsPath -Force -ErrorAction SilentlyContinue
+    }
+
     $transportPort = Get-FreeTcpPort
     $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if (@($config.ProxyPatterns) -notcontains 'antigravity.google.com') {
         throw 'Domain refresh did not store the Antigravity endpoint.'
+    }
+    foreach ($youtubePattern in @('*.youtube.com', '*.googlevideo.com', '*.ytimg.com', 'youtubei.googleapis.com')) {
+        if (@($config.ProxyPatterns) -notcontains $youtubePattern) {
+            throw "Domain refresh did not store the YouTube pattern '$youtubePattern'."
+        }
     }
     $config.ListenPort = $transportPort
     [IO.File]::WriteAllText(
@@ -279,6 +306,15 @@ internal static class AntigravityProbe
     $gemini = Invoke-CurlCheck -Uri 'https://gemini.google.com/' -ProxyPort $transportPort
     Invoke-ConnectProbe -HostName 'antigravity.google' -ProxyPort $transportPort
     Invoke-ConnectProbe -HostName 'daily-cloudcode-pa.googleapis.com' -ProxyPort $transportPort
+    foreach ($youtubeHost in @(
+            'www.youtube.com',
+            'music.youtube.com',
+            'www.youtube-nocookie.com',
+            'rr1---sn-test.googlevideo.com',
+            'i.ytimg.com',
+            'youtubei.googleapis.com')) {
+        Invoke-ConnectProbe -HostName $youtubeHost -ProxyPort $transportPort
+    }
     if ($direct.ExitCode -ne 0 -or $direct.Code -ne '200') {
         throw "Direct route failed: curl=$($direct.ExitCode), HTTP=$($direct.Code), error=$($direct.Error)."
     }
@@ -290,7 +326,10 @@ internal static class AntigravityProbe
         $routes = @(Get-Content -LiteralPath $socksStdout -Encoding UTF8 -ErrorAction SilentlyContinue)
         if (($routes -match '^CONNECT gemini\.google\.com:443$') -and
             ($routes -match '^CONNECT antigravity\.google:443$') -and
-            ($routes -match '^CONNECT daily-cloudcode-pa\.googleapis\.com:443$')) {
+            ($routes -match '^CONNECT daily-cloudcode-pa\.googleapis\.com:443$') -and
+            ($routes -match '^CONNECT www\.youtube\.com:443$') -and
+            ($routes -match '^CONNECT rr1---sn-test\.googlevideo\.com:443$') -and
+            ($routes -match '^CONNECT youtubei\.googleapis\.com:443$')) {
             break
         }
         Start-Sleep -Milliseconds 100
@@ -305,6 +344,17 @@ internal static class AntigravityProbe
     }
     if (-not ($routes -match '^CONNECT daily-cloudcode-pa\.googleapis\.com:443$')) {
         throw "Antigravity language-server endpoint did not enter SOCKS route. Routes: $($routes -join '; ')"
+    }
+    foreach ($youtubeHostPattern in @(
+            'www\.youtube\.com',
+            'music\.youtube\.com',
+            'www\.youtube-nocookie\.com',
+            'rr1---sn-test\.googlevideo\.com',
+            'i\.ytimg\.com',
+            'youtubei\.googleapis\.com')) {
+        if (-not ($routes -match "^CONNECT ${youtubeHostPattern}:443$")) {
+            throw "YouTube host '$youtubeHostPattern' did not enter SOCKS route. Routes: $($routes -join '; ')"
+        }
     }
 
     $baselineThreads = (Get-Process -Id $transportProcess.Id).Threads.Count
@@ -368,14 +418,18 @@ internal static class AntigravityProbe
 
     $directOffline = Invoke-CurlCheck -Uri 'https://example.com/' -ProxyPort $transportPort
     $geminiOffline = Invoke-CurlCheck -Uri 'https://gemini.google.com/' -ProxyPort $transportPort
+    $youtubeOffline = Invoke-CurlCheck -Uri 'https://www.youtube.com/' -ProxyPort $transportPort
     if ($directOffline.ExitCode -ne 0 -or $directOffline.Code -ne '200') {
         throw "Direct route stopped when SOCKS5 went offline: curl=$($directOffline.ExitCode), HTTP=$($directOffline.Code)."
     }
     if ($geminiOffline.ExitCode -eq 0 -or $geminiOffline.Code -ne '000') {
         throw "Gemini did not fail closed when SOCKS5 went offline: curl=$($geminiOffline.ExitCode), HTTP=$($geminiOffline.Code)."
     }
+    if ($youtubeOffline.ExitCode -eq 0 -or $youtubeOffline.Code -ne '000') {
+        throw "YouTube did not fail closed when SOCKS5 went offline: curl=$($youtubeOffline.ExitCode), HTTP=$($youtubeOffline.Code)."
+    }
 
-    Write-Host 'SUCCESS: compile, async concurrency, routing, process-scoped Antigravity launcher and fail-closed checks passed.' -ForegroundColor Green
+    Write-Host 'SUCCESS: compile, async concurrency, Gemini/YouTube routing, process-scoped Antigravity launcher and fail-closed checks passed.' -ForegroundColor Green
 }
 finally {
     foreach ($holdClient in $holdClients) { $holdClient.Close() }

@@ -7,7 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TransportVersion = '1.3.0'
+$script:TransportVersion = '1.4.0'
 $script:TaskName = 'geminUp'
 $script:ListenPort = 8877
 $script:InstallRoot = Join-Path $env:ProgramData 'geminUp'
@@ -18,6 +18,7 @@ $script:PidPath = Join-Path $script:InstallRoot 'transport.pid'
 $script:LogPath = Join-Path $script:InstallRoot 'transport.log'
 $script:SourcePath = Join-Path $PSScriptRoot 'transport\GeminUp.cs'
 $script:DomainPath = Join-Path $PSScriptRoot 'transport\domains.txt'
+$script:YouTubeDomainPath = Join-Path $PSScriptRoot 'transport\youtube-domains.txt'
 $script:InternetSettingsPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
 $script:InternetSettingsPolicyPath = 'HKLM:\Software\Policies\Microsoft\Windows\CurrentVersion\Internet Settings'
 $script:FirefoxPolicyPath = 'HKLM:\Software\Policies\Mozilla\Firefox'
@@ -207,18 +208,58 @@ function Build-TransportExecutable {
     Write-TransportLog OK "Transport built: $script:ExecutablePath"
 }
 
+function Test-YouTubeRoutingEnabled {
+    param([AllowNull()][object]$State)
+
+    return $null -ne $State -and
+        $State.PSObject.Properties.Name -contains 'YouTubeEnabled' -and
+        [bool]$State.YouTubeEnabled
+}
+
+function New-EffectiveDomainFile {
+    param([bool]$YouTubeEnabled)
+
+    if (-not $YouTubeEnabled) {
+        return $script:DomainPath
+    }
+    if (-not (Test-Path -LiteralPath $script:YouTubeDomainPath)) {
+        throw "YouTube routing file is missing: $script:YouTubeDomainPath"
+    }
+
+    Initialize-InstallDirectory
+    $temporaryPath = Join-Path $script:InstallRoot ('domains-{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
+    try {
+        $lines = @(
+            Get-Content -LiteralPath $script:DomainPath -Encoding utf8
+            Get-Content -LiteralPath $script:YouTubeDomainPath -Encoding utf8
+        )
+        [IO.File]::WriteAllLines($temporaryPath, [string[]]$lines, [Text.UTF8Encoding]::new($false))
+        return $temporaryPath
+    }
+    catch {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+}
+
 function Invoke-SecureProxyConfiguration {
+    param([bool]$YouTubeEnabled = $false)
+
     $secureProxy = Read-Host 'SOCKS5 (host:port:user:password)' -AsSecureString
     $pointer = [IntPtr]::Zero
     $plainProxy = $null
     $inputBytes = $null
+    $effectiveDomainPath = $null
     try {
+        $effectiveDomainPath = New-EffectiveDomainFile -YouTubeEnabled $YouTubeEnabled
         $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureProxy)
         $plainProxy = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
         $startInfo = [Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = $script:ExecutablePath
         $startInfo.Arguments = 'configure --config "{0}" --domains "{1}"' -f `
-            $script:ConfigPath.Replace('"', '\"'), $script:DomainPath.Replace('"', '\"')
+            $script:ConfigPath.Replace('"', '\"'), $effectiveDomainPath.Replace('"', '\"')
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardInput = $true
@@ -259,15 +300,31 @@ function Invoke-SecureProxyConfiguration {
         if ($pointer -ne [IntPtr]::Zero) {
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
         }
+        if ($null -ne $effectiveDomainPath -and
+            -not [string]::Equals($effectiveDomainPath, $script:DomainPath, [StringComparison]::OrdinalIgnoreCase) -and
+            (Test-Path -LiteralPath $effectiveDomainPath)) {
+            Remove-Item -LiteralPath $effectiveDomainPath -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
 function Invoke-DomainConfigurationRefresh {
-    $output = & $script:ExecutablePath refresh-domains --config $script:ConfigPath --domains $script:DomainPath 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Cannot refresh protected domains: $($output -join [Environment]::NewLine)"
+    param([bool]$YouTubeEnabled = $false)
+
+    $effectiveDomainPath = New-EffectiveDomainFile -YouTubeEnabled $YouTubeEnabled
+    try {
+        $output = & $script:ExecutablePath refresh-domains --config $script:ConfigPath --domains $effectiveDomainPath 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cannot refresh protected domains: $($output -join [Environment]::NewLine)"
+        }
+        Write-TransportLog OK ($output -join ' ')
     }
-    Write-TransportLog OK ($output -join ' ')
+    finally {
+        if (-not [string]::Equals($effectiveDomainPath, $script:DomainPath, [StringComparison]::OrdinalIgnoreCase) -and
+            (Test-Path -LiteralPath $effectiveDomainPath)) {
+            Remove-Item -LiteralPath $effectiveDomainPath -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Get-RegistryValueBackup {
@@ -377,8 +434,9 @@ function New-TransportState {
     $policyBackups += Get-RegistryValueBackup -Path $script:FirefoxPolicyPath -Name 'Preferences'
 
     return [PSCustomObject]@{
-        Version = 3
+        Version = 4
         InstalledAtUtc = [DateTime]::UtcNow.ToString('o')
+        YouTubeEnabled = $false
         RegistryBackups = $registryBackups
         PolicyBackups = $policyBackups
         ShortcutOwnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -559,7 +617,7 @@ function Set-AntigravityShortcutRouting {
         @($State.AntigravityShortcutBackups).Count -eq 0) {
         $backups = @(Get-AntigravityShortcutBackups -AntigravityPath $antigravityPath)
         $State | Add-Member -NotePropertyName AntigravityShortcutBackups -NotePropertyValue $backups -Force
-        $State.Version = 3
+        $State.Version = 4
         Save-JsonFile -Path $script:StatePath -Value $State
     }
 
@@ -741,11 +799,16 @@ function Unregister-TransportTask {
 }
 
 function Test-LocalTransport {
+    param([bool]$YouTubeEnabled = $false)
+
     $proxyUrl = 'http://127.0.0.1:{0}' -f $script:ListenPort
     $checks = @(
         [PSCustomObject]@{ Name = 'Direct route'; Uri = 'https://example.com/' },
         [PSCustomObject]@{ Name = 'Gemini SOCKS route'; Uri = 'https://gemini.google.com/' }
     )
+    if ($YouTubeEnabled) {
+        $checks += [PSCustomObject]@{ Name = 'YouTube SOCKS route'; Uri = 'https://www.youtube.com/' }
+    }
     foreach ($check in $checks) {
         try {
             $response = Invoke-WebRequest -Uri $check.Uri -Proxy $proxyUrl -Method Head -TimeoutSec 20 `
@@ -814,11 +877,13 @@ function Show-TransportStatus {
     Write-Host ('  Process:       {0}' -f $(if ($null -ne $process) { "running (PID $($process.Id))" } else { 'stopped' }))
     Write-Host ('  Machine proxy: {0} {1}' -f $proxyEnabled, $proxyServer)
     $state = Read-JsonFile -Path $script:StatePath
+    $youtubeEnabled = Test-YouTubeRoutingEnabled -State $state
     $shortcutCount = if ($null -ne $state -and
         $state.PSObject.Properties.Name -contains 'AntigravityShortcutBackups') {
         @($state.AntigravityShortcutBackups).Count
     } else { 0 }
     Write-Host ('  Antigravity:   {0}' -f $(if ($shortcutCount -gt 0) { "$shortcutCount managed shortcut(s)" } else { 'not process-routed' }))
+    Write-Host ('  YouTube:       {0}' -f $(if ($youtubeEnabled) { 'enabled' } else { 'disabled' }))
     $task = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
     Write-Host ('  Autostart:     {0}' -f ($null -ne $task))
 }
@@ -828,10 +893,11 @@ function Enable-Transport {
     Assert-Administrator
     $hadConfig = Test-Path -LiteralPath $script:ConfigPath
     $oldConfigBytes = if ($hadConfig) { [IO.File]::ReadAllBytes($script:ConfigPath) } else { $null }
+    $state = Read-JsonFile -Path $script:StatePath
+    $youtubeEnabled = Test-YouTubeRoutingEnabled -State $state
     try {
         Build-TransportExecutable
-        Invoke-SecureProxyConfiguration
-        $state = Read-JsonFile -Path $script:StatePath
+        Invoke-SecureProxyConfiguration -YouTubeEnabled $youtubeEnabled
         if ($null -eq $state) {
             $state = New-TransportState
             Save-JsonFile -Path $script:StatePath -Value $state
@@ -839,7 +905,7 @@ function Enable-Transport {
         Set-SystemProxyAndPolicies -State $state
         Register-TransportTask
         Start-TransportProcess
-        Test-LocalTransport
+        Test-LocalTransport -YouTubeEnabled $youtubeEnabled
         Set-AntigravityShortcutRouting -State $state
         Write-Host ''
         Write-Host '========================================' -ForegroundColor Green
@@ -887,13 +953,14 @@ function Refresh-Transport {
     }
 
     $state = Read-JsonFile -Path $script:StatePath
+    $youtubeEnabled = Test-YouTubeRoutingEnabled -State $state
     try {
         Build-TransportExecutable -Force
-        Invoke-DomainConfigurationRefresh
+        Invoke-DomainConfigurationRefresh -YouTubeEnabled $youtubeEnabled
         Set-SystemProxyAndPolicies -State $state
         Register-TransportTask
         Start-TransportProcess
-        Test-LocalTransport
+        Test-LocalTransport -YouTubeEnabled $youtubeEnabled
         Set-AntigravityShortcutRouting -State $state
         Write-Host ''
         Write-Host '========================================' -ForegroundColor Green
@@ -913,6 +980,44 @@ function Refresh-Transport {
         }
         catch {
             Write-TransportLog ERROR "Refresh recovery also failed: $($_.Exception.Message)"
+        }
+        throw $failure
+    }
+}
+
+function Switch-YouTubeRouting {
+    Assert-SupportedWindows
+    Assert-Administrator
+    if (-not (Test-Path -LiteralPath $script:ConfigPath) -or
+        -not (Test-Path -LiteralPath $script:StatePath)) {
+        throw 'geminUp is not configured yet. Use menu option 1 first.'
+    }
+
+    $state = Read-JsonFile -Path $script:StatePath
+    $wasEnabled = Test-YouTubeRoutingEnabled -State $state
+    $enable = -not $wasEnabled
+    $oldConfigBytes = [IO.File]::ReadAllBytes($script:ConfigPath)
+    $oldStateBytes = [IO.File]::ReadAllBytes($script:StatePath)
+    try {
+        $state.Version = 4
+        $state | Add-Member -NotePropertyName 'YouTubeEnabled' -NotePropertyValue $enable -Force
+        Invoke-DomainConfigurationRefresh -YouTubeEnabled $enable
+        Start-TransportProcess
+        Test-LocalTransport -YouTubeEnabled $enable
+        Save-JsonFile -Path $script:StatePath -Value $state
+        Write-TransportLog OK ('YouTube routing is now {0}. Restart open browsers to drop old connections.' -f `
+            $(if ($enable) { 'enabled' } else { 'disabled' }))
+    }
+    catch {
+        $failure = $_.Exception.Message
+        try {
+            [IO.File]::WriteAllBytes($script:ConfigPath, $oldConfigBytes)
+            [IO.File]::WriteAllBytes($script:StatePath, $oldStateBytes)
+            Start-TransportProcess
+            Write-TransportLog WARN 'Previous YouTube routing state restored.'
+        }
+        catch {
+            Write-TransportLog ERROR "YouTube routing rollback also failed: $($_.Exception.Message)"
         }
         throw $failure
     }
@@ -947,15 +1052,19 @@ function Show-Menu {
         Write-Host '  2. Change SOCKS5'
         Write-Host '  3. Disable and remove from autostart'
         Write-Host '  4. Apply downloaded update and restart'
+        $state = Read-JsonFile -Path $script:StatePath
+        $youtubeAction = if (Test-YouTubeRoutingEnabled -State $state) { 'Disable' } else { 'Enable' }
+        Write-Host ("  5. {0} YouTube routing" -f $youtubeAction)
         Write-Host ''
-        $selection = Read-Host 'Select 1-4'
+        $selection = Read-Host 'Select 1-5'
         try {
             switch ($selection) {
                 '1' { Enable-Transport; break }
                 '2' { Enable-Transport; break }
                 '3' { Disable-Transport; break }
                 '4' { Refresh-Transport; break }
-                default { Write-TransportLog WARN 'Enter 1, 2, 3 or 4.'; Start-Sleep -Seconds 2; continue }
+                '5' { Switch-YouTubeRouting; break }
+                default { Write-TransportLog WARN 'Enter 1, 2, 3, 4 or 5.'; Start-Sleep -Seconds 2; continue }
             }
         }
         catch {
