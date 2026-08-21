@@ -22,6 +22,7 @@ $script:WatchdogStatePath = Join-Path $script:InstallRoot 'watchdog-state.json'
 $script:SourcePath = Join-Path $PSScriptRoot 'transport\GeminUp.cs'
 $script:DomainPath = Join-Path $PSScriptRoot 'transport\domains.txt'
 $script:YouTubeDomainPath = Join-Path $PSScriptRoot 'transport\youtube-domains.txt'
+$script:UpdateModulePath = Join-Path $PSScriptRoot 'update\GeminUp.Update.psm1'
 $script:InternetSettingsPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
 $script:InternetSettingsPolicyPath = 'HKLM:\Software\Policies\Microsoft\Windows\CurrentVersion\Internet Settings'
 $script:FirefoxPolicyPath = 'HKLM:\Software\Policies\Mozilla\Firefox'
@@ -1182,6 +1183,52 @@ function Refresh-Transport {
     }
 }
 
+function Update-AndRefreshTransport {
+    Assert-SupportedWindows
+    Assert-Administrator
+    if (-not (Test-Path -LiteralPath $script:ConfigPath) -or
+        -not (Test-Path -LiteralPath $script:StatePath)) {
+        throw 'geminUp is not configured yet. Use menu option 1 first.'
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $script:UpdateModulePath -PathType Leaf)) {
+            throw "Update module is missing: $script:UpdateModulePath"
+        }
+        Import-Module -Name $script:UpdateModulePath -Force
+        Write-TransportLog INFO 'Checking GitHub for the latest verified geminUp release...'
+        $release = Get-GeminUpLatestVerifiedRelease
+    }
+    catch {
+        Write-TransportLog WARN "GitHub update was not applied: $($_.Exception.Message)"
+        Write-TransportLog WARN 'Rebuilding and restarting geminUp from the current local files.'
+        Refresh-Transport
+        return
+    }
+
+    $currentVersion = [Version]$script:TransportVersion
+    if ($release.Version -le $currentVersion) {
+        if ($release.Version -lt $currentVersion) {
+            Write-TransportLog WARN (
+                "Latest GitHub release $($release.Version) is older than local version $currentVersion; downgrade blocked.")
+        }
+        else {
+            Write-TransportLog INFO "geminUp $currentVersion is already the latest release."
+        }
+        Refresh-Transport
+        return
+    }
+
+    Write-TransportLog OK (
+        "Verified geminUp $($release.Version) downloaded to $($release.ReleaseRoot)")
+    $powershellPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    & $powershellPath -NoLogo -NoProfile -ExecutionPolicy Bypass `
+        -File $release.ControllerPath -Action refresh
+    if ($LASTEXITCODE -ne 0) {
+        throw "Downloaded geminUp $($release.Version) failed to apply (exit code $LASTEXITCODE)."
+    }
+}
+
 function Switch-YouTubeRouting {
     Assert-SupportedWindows
     Assert-Administrator
@@ -1250,7 +1297,7 @@ function Show-Menu {
         Write-Host '  1. Enter SOCKS5 and enable'
         Write-Host '  2. Change SOCKS5'
         Write-Host '  3. Disable and remove from autostart'
-        Write-Host '  4. Apply downloaded update and restart'
+        Write-Host '  4. Download/apply latest update and restart'
         $state = Read-JsonFile -Path $script:StatePath
         $youtubeAction = if (Test-YouTubeRoutingEnabled -State $state) { 'Disable' } else { 'Enable' }
         Write-Host ("  5. {0} YouTube routing" -f $youtubeAction)
@@ -1261,7 +1308,7 @@ function Show-Menu {
                 '1' { Enable-Transport; break }
                 '2' { Enable-Transport; break }
                 '3' { Disable-Transport; break }
-                '4' { Refresh-Transport; break }
+                '4' { Update-AndRefreshTransport; break }
                 '5' { Switch-YouTubeRouting; break }
                 default { Write-TransportLog WARN 'Enter 1, 2, 3, 4 or 5.'; Start-Sleep -Seconds 2; continue }
             }

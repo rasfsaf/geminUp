@@ -63,7 +63,7 @@ Android-приложение не является VPN и не перехват�
 1. Enter SOCKS5 and enable
 2. Change SOCKS5
 3. Disable and remove from autostart
-4. Apply downloaded update and restart
+4. Download/apply latest update and restart
 5. Enable YouTube routing
 ```
 
@@ -84,14 +84,15 @@ socks5://username:password@host:port
 
 Просто скачать и заменить файлы недостаточно. Работающий transport запускается из уже скомпилированного `%ProgramData%\geminUp\geminUp.exe` и сам от замены исходников не обновится.
 
-После каждого скачивания новой версии:
+Для обновления:
 
-1. распакуй новый архив поверх старых исходников;
-2. запусти `geminUp.bat` и подтверди UAC;
-3. выбери пункт `4. Apply downloaded update and restart`;
-4. полностью закрой и заново открой Antigravity и браузеры.
+1. запусти `geminUp.bat` и подтверди UAC;
+2. выбери пункт `4. Download/apply latest update and restart`;
+3. полностью закрой и заново открой Antigravity и браузеры.
 
-Пункт 4 не просит повторно вводить SOCKS5: он пересобирает EXE, перечитывает `transport/domains.txt` и, если включён YouTube, `transport/youtube-domains.txt`, переустанавливает задачу автозапуска, обновляет ярлыки Antigravity и перезапускает transport с уже сохранённой DPAPI-конфигурацией.
+Пункт 4 скачивает последний release ZIP и опубликованный SHA-256, проверяет архив и запрещает downgrade. Проверенные релизы хранятся в `%LOCALAPPDATA%\geminUp\releases`. Исходная папка, из которой запущен `geminUp.bat`, не перезаписывается.
+
+После проверки обновления контроллер пересобирает EXE, перечитывает `transport/domains.txt` и, если включён YouTube, `transport/youtube-domains.txt`, переустанавливает задачу автозапуска, обновляет ярлыки Antigravity и перезапускает transport с уже сохранённой DPAPI-конфигурацией. Повторно вводить SOCKS5 не нужно. Если GitHub недоступен, checksum не совпал или архив повреждён, контроллер показывает предупреждение и выполняет пересборку из текущих локальных файлов.
 
 ## Как устроена маршрутизация Windows
 
