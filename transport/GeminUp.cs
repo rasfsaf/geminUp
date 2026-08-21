@@ -472,6 +472,13 @@ namespace GeminUp
                     client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
                     Task handler = HandleClientAndReleaseAsync(client);
                 }
+                catch (SocketException error)
+                {
+                    if (client != null) client.Close();
+                    slots.Release();
+                    logger.Write("WARN", "Listener temporarily failed: " + error.Message + ". Retrying.");
+                    Thread.Sleep(1000);
+                }
                 catch
                 {
                     if (client != null) client.Close();
@@ -920,7 +927,15 @@ namespace GeminUp
                 try
                 {
                     logger.Write("INFO", "Starting geminUp with SOCKS5 " + proxy.SafeDescription + ".");
-                    new LocalTransport(config, proxy, logger).Run();
+                    try
+                    {
+                        new LocalTransport(config, proxy, logger).Run();
+                    }
+                    catch (Exception error)
+                    {
+                        logger.Write("ERROR", "Fatal transport error: " + error);
+                        throw;
+                    }
                 }
                 finally
                 {

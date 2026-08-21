@@ -172,6 +172,19 @@ try {
     if ($parseErrors.Count -gt 0) {
         throw "PowerShell parser errors: $($parseErrors.Message -join '; ')"
     }
+    $controllerText = Get-Content -LiteralPath $controllerPath -Raw -Encoding UTF8
+    foreach ($requiredControllerPattern in @(
+            'New-ScheduledTaskTrigger\s+-AtStartup',
+            'New-ScheduledTaskTrigger\s+-AtLogOn',
+            '(?s)New-ScheduledTaskSettingsSet.{0,400}-StartWhenAvailable',
+            "WatchdogTaskName = 'geminUp Watchdog'",
+            'ConsecutiveFailures = \$failureCount',
+            'Restore-SystemProxyAndPolicies -State \$state',
+            'Show-FailOpenNotification')) {
+        if ($controllerText -notmatch $requiredControllerPattern) {
+            throw "Controller is missing required recovery behavior: $requiredControllerPattern"
+        }
+    }
 
     $compiler = @(
         (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
@@ -293,6 +306,36 @@ internal static class AntigravityProbe
 
     $pidPath = Join-Path $resolvedTestRoot 'transport.pid'
     $transportLog = Join-Path $resolvedTestRoot 'transport.log'
+    $fatalMutex = 'Local\geminUp_FatalTest_' + [Guid]::NewGuid().ToString('N')
+    $occupiedListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $transportPort)
+    $occupiedListener.Start()
+    try {
+        $previousPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $fatalOutput = & $executable run --config $configPath --pid $pidPath --log $transportLog `
+                --mutex $fatalMutex 2>&1
+            $fatalExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousPreference
+        }
+    }
+    finally {
+        $occupiedListener.Stop()
+    }
+    if ($fatalExitCode -ne 1) {
+        throw "Transport did not fail when its listener port was occupied: exit=$fatalExitCode, output=$($fatalOutput -join '; ')"
+    }
+    $fatalLog = Get-Content -LiteralPath $transportLog -Raw -Encoding UTF8
+    if ($fatalLog -notmatch '\[ERROR\] Fatal transport error:') {
+        throw "Fatal listener failure was not persisted to transport.log: $fatalLog"
+    }
+    if (Test-Path -LiteralPath $pidPath) {
+        throw 'Transport left a stale PID file after a handled fatal error.'
+    }
+    Remove-Item -LiteralPath $transportLog -Force
+
     $testMutex = 'Local\geminUp_Test_' + [Guid]::NewGuid().ToString('N')
     $transportProcess = Start-Process -FilePath $executable -ArgumentList @(
         'run', '--config', $([char]34 + $configPath + [char]34),

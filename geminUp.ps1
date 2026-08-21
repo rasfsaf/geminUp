@@ -1,21 +1,24 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status')]
+    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status', 'watchdog')]
     [string]$Action = 'menu'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TransportVersion = '1.4.0'
+$script:TransportVersion = '1.4.1'
 $script:TaskName = 'geminUp'
+$script:WatchdogTaskName = 'geminUp Watchdog'
 $script:ListenPort = 8877
 $script:InstallRoot = Join-Path $env:ProgramData 'geminUp'
 $script:ExecutablePath = Join-Path $script:InstallRoot 'geminUp.exe'
+$script:ControllerPath = Join-Path $script:InstallRoot 'geminUp-controller.ps1'
 $script:ConfigPath = Join-Path $script:InstallRoot 'config.json'
 $script:StatePath = Join-Path $script:InstallRoot 'state.json'
 $script:PidPath = Join-Path $script:InstallRoot 'transport.pid'
 $script:LogPath = Join-Path $script:InstallRoot 'transport.log'
+$script:WatchdogStatePath = Join-Path $script:InstallRoot 'watchdog-state.json'
 $script:SourcePath = Join-Path $PSScriptRoot 'transport\GeminUp.cs'
 $script:DomainPath = Join-Path $PSScriptRoot 'transport\domains.txt'
 $script:YouTubeDomainPath = Join-Path $PSScriptRoot 'transport\youtube-domains.txt'
@@ -39,6 +42,23 @@ function Write-TransportLog {
         default { 'Cyan' }
     }
     Write-Host ('[{0}] {1}' -f $Level, $Message) -ForegroundColor $color
+}
+
+function Write-TransportFileLog {
+    param(
+        [ValidateSet('INFO', 'OK', 'WARN', 'ERROR')]
+        [string]$Level,
+        [string]$Message
+    )
+
+    try {
+        Initialize-InstallDirectory
+        $line = '{0:o} [{1}] {2}{3}' -f [DateTime]::UtcNow, $Level, $Message, [Environment]::NewLine
+        [IO.File]::AppendAllText($script:LogPath, $line, [Text.UTF8Encoding]::new($false))
+    }
+    catch {
+        Write-Warning "Cannot append to transport.log: $($_.Exception.Message)"
+    }
 }
 
 function Test-IsAdministrator {
@@ -776,26 +796,189 @@ function Start-TransportProcess {
     throw 'Background transport did not start within 10 seconds. Check transport.log.'
 }
 
+function Test-TransportListener {
+    param([int]$TimeoutMilliseconds = 500)
+
+    $client = [Net.Sockets.TcpClient]::new()
+    $async = $null
+    try {
+        $async = $client.BeginConnect('127.0.0.1', $script:ListenPort, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) {
+            return $false
+        }
+        $client.EndConnect($async)
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($null -ne $async) {
+            $async.AsyncWaitHandle.Close()
+        }
+        $client.Close()
+    }
+}
+
+function Show-FailOpenNotification {
+    $message = 'geminUp stopped after an error. Previous Windows proxy settings were restored, so normal internet access remains available. Gemini proxy protection is OFF. Open geminUp to repair it.'
+    $msgPath = Join-Path $env:WINDIR 'System32\msg.exe'
+    if (-not (Test-Path -LiteralPath $msgPath -PathType Leaf)) {
+        Write-TransportFileLog WARN 'Cannot notify the signed-in user because msg.exe is unavailable.'
+        return
+    }
+    try {
+        $notification = Start-Process -FilePath $msgPath -ArgumentList @('*', '/TIME:120', $message) `
+            -WindowStyle Hidden -Wait -PassThru
+        if ($notification.ExitCode -ne 0) {
+            Write-TransportFileLog WARN "User notification exited with code $($notification.ExitCode)."
+        }
+    }
+    catch {
+        Write-TransportFileLog WARN "Cannot notify the signed-in user: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-TransportWatchdog {
+    if (-not (Test-Path -LiteralPath $script:StatePath) -or
+        -not (Test-Path -LiteralPath $script:ConfigPath) -or
+        -not (Test-Path -LiteralPath $script:ExecutablePath)) {
+        return
+    }
+
+    try {
+        $settings = Get-Item -LiteralPath $script:InternetSettingsPath
+        $proxyEnabled = [bool]$settings.GetValue('ProxyEnable', 0)
+        $proxyServer = [string]$settings.GetValue('ProxyServer', '')
+    }
+    catch {
+        Write-TransportFileLog ERROR "Watchdog cannot read Windows proxy settings: $($_.Exception.Message)"
+        return
+    }
+    if (-not $proxyEnabled -or
+        -not [string]::Equals($proxyServer, "127.0.0.1:$script:ListenPort", [StringComparison]::OrdinalIgnoreCase)) {
+        return
+    }
+    if (Test-TransportListener) {
+        Remove-Item -LiteralPath $script:WatchdogStatePath -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    $previousFailures = 0
+    if (Test-Path -LiteralPath $script:WatchdogStatePath) {
+        try {
+            $watchdogState = Read-JsonFile -Path $script:WatchdogStatePath
+            if ($null -ne $watchdogState -and $watchdogState.PSObject.Properties.Name -contains 'ConsecutiveFailures') {
+                $previousFailures = [Math]::Max(0, [int]$watchdogState.ConsecutiveFailures)
+            }
+        }
+        catch {
+            Write-TransportFileLog WARN "Ignoring damaged watchdog state: $($_.Exception.Message)"
+        }
+    }
+    $failureCount = $previousFailures + 1
+    Write-TransportFileLog WARN "Watchdog found no listener on 127.0.0.1:$script:ListenPort; recovery attempt $failureCount of 3."
+
+    try {
+        $task = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction Stop
+        if ($task.State -eq 'Running') {
+            Stop-ScheduledTask -TaskName $script:TaskName -ErrorAction Stop
+        }
+        Stop-TransportProcess
+        Start-ScheduledTask -TaskName $script:TaskName -ErrorAction Stop
+    }
+    catch {
+        Write-TransportFileLog ERROR "Watchdog could not restart transport: $($_.Exception.Message)"
+    }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-TransportListener -TimeoutMilliseconds 250) {
+            Remove-Item -LiteralPath $script:WatchdogStatePath -Force -ErrorAction SilentlyContinue
+            Write-TransportFileLog OK 'Watchdog restarted the local transport successfully.'
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    Save-JsonFile -Path $script:WatchdogStatePath -Value ([PSCustomObject]@{
+            ConsecutiveFailures = $failureCount
+            FailOpen = $false
+            UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
+        })
+    if ($failureCount -lt 3) {
+        return
+    }
+
+    try {
+        Stop-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
+        Stop-TransportProcess
+        $state = Read-JsonFile -Path $script:StatePath
+        if ($null -eq $state) {
+            throw 'Install state is missing.'
+        }
+        Restore-AntigravityShortcuts -State $state
+        Restore-SystemProxyAndPolicies -State $state
+    }
+    catch {
+        Write-TransportFileLog ERROR "Cannot restore all previous proxy settings: $($_.Exception.Message)"
+        try {
+            New-ItemProperty -LiteralPath $script:InternetSettingsPath -Name 'ProxyEnable' `
+                -Value 0 -PropertyType DWord -Force | Out-Null
+            Notify-InternetSettingsChanged
+        }
+        catch {
+            Write-TransportFileLog ERROR "Emergency proxy disable also failed: $($_.Exception.Message)"
+            return
+        }
+    }
+
+    Save-JsonFile -Path $script:WatchdogStatePath -Value ([PSCustomObject]@{
+            ConsecutiveFailures = $failureCount
+            FailOpen = $true
+            UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
+        })
+    Write-TransportFileLog ERROR 'Transport recovery failed three times. Previous Windows proxy settings were restored; Gemini proxy protection is OFF.'
+    Show-FailOpenNotification
+}
+
 function Register-TransportTask {
+    Copy-Item -LiteralPath $PSCommandPath -Destination $script:ControllerPath -Force
     $taskAction = New-ScheduledTaskAction -Execute $script:ExecutablePath -Argument (
         'run --config "{0}" --pid "{1}" --log "{2}"' -f $script:ConfigPath, $script:PidPath, $script:LogPath)
-    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $triggers = @(
+        New-ScheduledTaskTrigger -AtStartup
+        New-ScheduledTaskTrigger -AtLogOn
+    )
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) `
-        -MultipleInstances IgnoreNew
-    Register-ScheduledTask -TaskName $script:TaskName -Action $taskAction -Trigger $trigger `
+        -MultipleInstances IgnoreNew -StartWhenAvailable
+    Register-ScheduledTask -TaskName $script:TaskName -Action $taskAction -Trigger $triggers `
         -Principal $principal -Settings $settings -Description 'Routes Gemini and Antigravity dependencies through a user-provided SOCKS5 proxy.' `
         -Force | Out-Null
-    Write-TransportLog OK 'Machine-wide autostart task registered under SYSTEM.'
+
+    $powershellPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $watchdogAction = New-ScheduledTaskAction -Execute $powershellPath -Argument (
+        '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Action watchdog' -f $script:ControllerPath)
+    $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+        -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
+    $watchdogSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew -StartWhenAvailable
+    Register-ScheduledTask -TaskName $script:WatchdogTaskName -Action $watchdogAction -Trigger $watchdogTrigger `
+        -Principal $principal -Settings $watchdogSettings -Description 'Restarts geminUp or restores Windows proxy settings after repeated local transport failures.' `
+        -Force | Out-Null
+    Write-TransportLog OK 'Machine-wide startup, logon recovery and watchdog tasks registered under SYSTEM.'
 }
 
 function Unregister-TransportTask {
-    $task = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
-    if ($null -ne $task) {
-        Unregister-ScheduledTask -TaskName $script:TaskName -Confirm:$false
-        Write-TransportLog OK 'Autostart task removed.'
+    foreach ($taskName in @($script:TaskName, $script:WatchdogTaskName)) {
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($null -ne $task) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+        }
     }
+    Write-TransportLog OK 'Autostart and watchdog tasks removed.'
 }
 
 function Test-LocalTransport {
@@ -876,6 +1059,18 @@ function Show-TransportStatus {
     Write-Host ('  SOCKS stored:  {0}' -f $configured)
     Write-Host ('  Process:       {0}' -f $(if ($null -ne $process) { "running (PID $($process.Id))" } else { 'stopped' }))
     Write-Host ('  Machine proxy: {0} {1}' -f $proxyEnabled, $proxyServer)
+    $failOpen = $false
+    if (Test-Path -LiteralPath $script:WatchdogStatePath) {
+        try {
+            $watchdogState = Read-JsonFile -Path $script:WatchdogStatePath
+            $failOpen = $null -ne $watchdogState -and
+                $watchdogState.PSObject.Properties.Name -contains 'FailOpen' -and [bool]$watchdogState.FailOpen
+        }
+        catch {
+            Write-TransportLog WARN "Cannot read watchdog state: $($_.Exception.Message)"
+        }
+    }
+    Write-Host ('  Fail-safe:     {0}' -f $(if ($failOpen) { 'OPEN - proxy protection is OFF' } else { 'armed' }))
     $state = Read-JsonFile -Path $script:StatePath
     $youtubeEnabled = Test-YouTubeRoutingEnabled -State $state
     $shortcutCount = if ($null -ne $state -and
@@ -907,6 +1102,7 @@ function Enable-Transport {
         Start-TransportProcess
         Test-LocalTransport -YouTubeEnabled $youtubeEnabled
         Set-AntigravityShortcutRouting -State $state
+        Remove-Item -LiteralPath $script:WatchdogStatePath -Force -ErrorAction SilentlyContinue
         Write-Host ''
         Write-Host '========================================' -ForegroundColor Green
         Write-Host '  SUCCESSFUL: geminUp is enabled' -ForegroundColor Green
@@ -962,6 +1158,7 @@ function Refresh-Transport {
         Start-TransportProcess
         Test-LocalTransport -YouTubeEnabled $youtubeEnabled
         Set-AntigravityShortcutRouting -State $state
+        Remove-Item -LiteralPath $script:WatchdogStatePath -Force -ErrorAction SilentlyContinue
         Write-Host ''
         Write-Host '========================================' -ForegroundColor Green
         Write-Host '  SUCCESSFUL: geminUp was refreshed' -ForegroundColor Green
@@ -1005,6 +1202,7 @@ function Switch-YouTubeRouting {
         Start-TransportProcess
         Test-LocalTransport -YouTubeEnabled $enable
         Save-JsonFile -Path $script:StatePath -Value $state
+        Remove-Item -LiteralPath $script:WatchdogStatePath -Force -ErrorAction SilentlyContinue
         Write-TransportLog OK ('YouTube routing is now {0}. Restart open browsers to drop old connections.' -f `
             $(if ($enable) { 'enabled' } else { 'disabled' }))
     }
@@ -1040,6 +1238,7 @@ function Disable-Transport {
     if (Test-Path -LiteralPath $script:ConfigPath) {
         Remove-Item -LiteralPath $script:ConfigPath -Force
     }
+    Remove-Item -LiteralPath $script:WatchdogStatePath -Force -ErrorAction SilentlyContinue
     Write-TransportLog OK 'geminUp disabled. Encrypted SOCKS5 credentials removed.'
 }
 
@@ -1082,6 +1281,7 @@ try {
         'refresh' { Refresh-Transport }
         'disable' { Disable-Transport }
         'status' { Show-TransportStatus }
+        'watchdog' { Invoke-TransportWatchdog }
     }
 }
 catch {
