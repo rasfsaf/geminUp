@@ -67,9 +67,13 @@ Download and run `geminUp-bootstrap.bat`. It will:
 3. Disable and remove from autostart
 4. Download/apply latest update and restart
 5. Enable YouTube routing
+6. Patch Antigravity binaries
+7. Roll back Antigravity binary patch
 ```
 
 Option 5 toggles between `Enable YouTube routing` and `Disable YouTube routing`. It is disabled by default, persists across updates, and can be changed without entering the SOCKS5 proxy again. After changing it, fully restart all open browsers so they close existing connections.
+
+Items 6 and 7 patch `language_server*.exe` and `agy.exe`: the protobuf field `ineligible` is rewritten as `inexigible`. The strings are the same length, so the file size and layout do not change. Enable and Refresh apply the patch automatically; item 6 runs it on its own, and item 7 restores `ineligible`. The same rewrite clears other Antigravity client errors tied to that field, including the ineligible-account state (`SET_INELIGIBLE` / `ineligibleTiers`). If the install is not found, the menu asks for the binary or its folder. Prefix a folder with `scan ` only when the usual locations are not enough.
 
 Supported formats:
 

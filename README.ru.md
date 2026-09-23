@@ -67,9 +67,13 @@ Android-приложение не является VPN и не перехват�
 3. Disable and remove from autostart
 4. Download/apply latest update and restart
 5. Enable YouTube routing
+6. Patch Antigravity binaries
+7. Roll back Antigravity binary patch
 ```
 
 Пункт 5 переключается между `Enable YouTube routing` и `Disable YouTube routing`. Настройка по умолчанию выключена, сохраняется между обновлениями и применяется без повторного ввода SOCKS5. После переключения полностью перезапусти открытые браузеры, чтобы они закрыли старые соединения.
+
+Пункты 6 и 7 правят `language_server*.exe` и `agy.exe`: поле protobuf `ineligible` заменяется на `inexigible`. Длина строки та же, размер и структура файла не меняются. Enable и Refresh применяют патч сами; пункт 6 запускает его отдельно, пункт 7 возвращает `ineligible`. Та же замена снимает другие клиентские ошибки Antigravity, завязанные на это поле, включая состояние ineligible account (`SET_INELIGIBLE` / `ineligibleTiers`). Если установка не найдена, меню просит путь к exe или к папке. Полный обход папки начинается с `scan `, если обычных мест недостаточно.
 
 Поддерживаются форматы:
 

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status', 'watchdog')]
+    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status', 'watchdog', 'antigravity-patch', 'antigravity-rollback')]
     [string]$Action = 'menu'
 )
 
@@ -28,6 +28,13 @@ $script:InternetSettingsPolicyPath = 'HKLM:\Software\Policies\Microsoft\Windows\
 $script:FirefoxPolicyPath = 'HKLM:\Software\Policies\Mozilla\Firefox'
 $script:FirefoxProxyPolicyPath = Join-Path $script:FirefoxPolicyPath 'Proxy'
 $script:DotNet48InstallerUri = 'https://go.microsoft.com/fwlink/?linkid=2088631'
+$script:AntigravityPatchFrom = [Text.Encoding]::ASCII.GetBytes('ineligible')
+$script:AntigravityPatchTo = [Text.Encoding]::ASCII.GetBytes('inexigible')
+$script:AntigravityPatchFileNames = @(
+    'agy.exe',
+    'language_server.exe',
+    'language_server_windows_x64.exe'
+)
 
 function Write-TransportLog {
     param(
@@ -618,7 +625,342 @@ function Get-AntigravityShortcutBackups {
     }
 }
 
+function Get-AntigravityPatchRoots {
+    $roots = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @('LOCALAPPDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'USERPROFILE')) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if ($value) { [void]$roots.Add($value) }
+    }
+    return @($roots | Select-Object -Unique)
+}
+
+function Get-AntigravityFastCandidates {
+    param([string[]]$Roots = (Get-AntigravityPatchRoots))
+
+    $relative = @(
+        'Programs\antigravity\resources\bin\language_server.exe',
+        'Programs\antigravity\resources\bin\language_server_windows_x64.exe',
+        'Programs\antigravity\resources\bin\agy.exe',
+        'Programs\Antigravity\resources\bin\language_server.exe',
+        'Programs\Antigravity IDE\resources\bin\language_server.exe',
+        'antigravity\resources\bin\language_server.exe',
+        'Antigravity\resources\bin\language_server.exe',
+        'agy\bin\agy.exe',
+        'agy\bin\language_server.exe',
+        'Antigravity\agy.exe',
+        'Antigravity\language_server.exe',
+        'Antigravity IDE\language_server.exe',
+        'antigravity\language_server.exe',
+        'scoop\apps\antigravity\current\resources\bin\language_server.exe',
+        'scoop\apps\antigravity\current\agy.exe'
+    )
+    $paths = New-Object System.Collections.Generic.List[string]
+    foreach ($root in @($Roots)) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        foreach ($tail in $relative) {
+            [void]$paths.Add((Join-Path $root $tail))
+        }
+    }
+    return @($paths | Select-Object -Unique)
+}
+
+function Get-AntigravityInstallDirs {
+    $roots = New-Object System.Collections.Generic.List[string]
+    $localAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA')
+    $programFiles = [Environment]::GetEnvironmentVariable('PROGRAMFILES')
+    $programFilesX86 = [Environment]::GetEnvironmentVariable('PROGRAMFILES(X86)')
+    $userProfile = [Environment]::GetEnvironmentVariable('USERPROFILE')
+
+    foreach ($candidate in @(
+            (Join-Path $localAppData 'Programs\antigravity'),
+            (Join-Path $localAppData 'Programs\Antigravity'),
+            (Join-Path $localAppData 'Programs\Antigravity IDE'),
+            (Join-Path $localAppData 'antigravity'),
+            (Join-Path $localAppData 'Antigravity'),
+            (Join-Path $localAppData 'Antigravity IDE'),
+            (Join-Path $localAppData 'agy'),
+            (Join-Path $localAppData 'agy\bin'),
+            (Join-Path $programFiles 'Antigravity'),
+            (Join-Path $programFiles 'Antigravity IDE'),
+            (Join-Path $programFiles 'antigravity'),
+            (Join-Path $programFilesX86 'Antigravity'),
+            (Join-Path $programFilesX86 'Antigravity IDE'),
+            (Join-Path $programFilesX86 'antigravity'),
+            (Join-Path $userProfile 'scoop\apps\antigravity\current'),
+            (Join-Path $userProfile 'scoop\apps\antigravity')
+        )) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Container)) {
+            [void]$roots.Add($candidate)
+        }
+    }
+
+    foreach ($parent in @($localAppData, $programFiles, $programFilesX86, (Join-Path $userProfile 'scoop\apps'))) {
+        if (-not $parent -or -not (Test-Path -LiteralPath $parent)) { continue }
+        try {
+            Get-ChildItem -LiteralPath $parent -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_.Name -match '(?i)antigravity|^agy$') {
+                    [void]$roots.Add($_.FullName)
+                }
+            }
+        } catch {
+            Write-Warning "Could not list '$parent': $($_.Exception.Message)"
+        }
+    }
+
+    $programs = Join-Path $localAppData 'Programs'
+    if ($programs -and (Test-Path -LiteralPath $programs)) {
+        try {
+            Get-ChildItem -LiteralPath $programs -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_.Name -match '(?i)antigravity|^agy$') {
+                    [void]$roots.Add($_.FullName)
+                }
+            }
+        } catch {
+            Write-Warning "Could not list '$programs': $($_.Exception.Message)"
+        }
+    }
+
+    return @($roots | Select-Object -Unique)
+}
+
+function Resolve-AntigravityPatchTargets {
+    param(
+        [Parameter(Mandatory = $true)][string]$InputPath,
+        [switch]$Shallow
+    )
+
+    $cleaned = $InputPath.Trim().Trim('"').Trim("'")
+    if ([string]::IsNullOrWhiteSpace($cleaned)) { return @() }
+    if (-not (Test-Path -LiteralPath $cleaned)) {
+        Write-Warning "Path does not exist: $cleaned"
+        return @()
+    }
+
+    $item = Get-Item -LiteralPath $cleaned -Force
+    $targets = New-Object System.Collections.Generic.List[System.IO.FileInfo]
+    if (-not $item.PSIsContainer) {
+        if ($script:AntigravityPatchFileNames -contains $item.Name) {
+            [void]$targets.Add($item)
+        } else {
+            Write-Warning "Not an Antigravity patch target: $($item.Name). Expected agy.exe or language_server*.exe."
+        }
+        return @($targets)
+    }
+
+    if ($Shallow) {
+        foreach ($relative in @(
+                'resources\bin\language_server.exe',
+                'resources\bin\language_server_windows_x64.exe',
+                'resources\bin\agy.exe',
+                'bin\language_server.exe',
+                'bin\agy.exe',
+                'language_server.exe',
+                'language_server_windows_x64.exe',
+                'agy.exe'
+            )) {
+            $candidate = Join-Path $item.FullName $relative
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                [void]$targets.Add((Get-Item -LiteralPath $candidate -Force))
+            }
+        }
+        return @($targets)
+    }
+
+    Write-Host "  scanning $($item.FullName)" -ForegroundColor DarkCyan
+    $pending = New-Object System.Collections.Generic.Queue[string]
+    $pending.Enqueue($item.FullName)
+    $listed = 0
+    while ($pending.Count -gt 0) {
+        $dir = $pending.Dequeue()
+        $listed++
+        if (($listed % 25) -eq 0) {
+            Write-Host "  scanned folders: $listed" -ForegroundColor DarkGray
+        }
+        try {
+            foreach ($child in @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)) {
+                if ($child.PSIsContainer) {
+                    if ($child.Name -match '^(?i)(node_modules|\.git)$') { continue }
+                    $pending.Enqueue($child.FullName)
+                } elseif ($script:AntigravityPatchFileNames -contains $child.Name) {
+                    [void]$targets.Add($child)
+                }
+            }
+        } catch {
+            Write-Warning "Could not list '$dir': $($_.Exception.Message)"
+        }
+    }
+    return @($targets)
+}
+
+function Get-AntigravityPatchTargets {
+    $targets = New-Object System.Collections.Generic.List[System.IO.FileInfo]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+
+    Write-Host 'Looking for Antigravity binaries...' -ForegroundColor Cyan
+    foreach ($path in @(Get-AntigravityFastCandidates)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        if ($seen.Add($path)) {
+            [void]$targets.Add((Get-Item -LiteralPath $path -Force))
+        }
+    }
+    if ($targets.Count -gt 0) { return @($targets) }
+
+    foreach ($dir in @(Get-AntigravityInstallDirs)) {
+        foreach ($file in @(Resolve-AntigravityPatchTargets -InputPath $dir -Shallow)) {
+            if ($seen.Add($file.FullName)) {
+                [void]$targets.Add($file)
+            }
+        }
+    }
+    return @($targets)
+}
+
+function Read-AntigravityPatchTargets {
+    while ($true) {
+        Write-Host ''
+        Write-Host 'Fast path: type the full path to agy.exe or language_server*.exe.' -ForegroundColor Yellow
+        Write-Host 'Or type an install folder. Empty input cancels. Type scan <folder> to search it.' -ForegroundColor Yellow
+        $answer = Read-Host 'Path'
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            Write-Warning 'Antigravity patch cancelled.'
+            return @()
+        }
+        $scan = $answer.Trim() -match '^(?i)scan\s+(.+)$'
+        $path = if ($scan) { $Matches[1] } else { $answer }
+        $targets = @(Resolve-AntigravityPatchTargets -InputPath $path -Shallow:(-not $scan))
+        if ($targets.Count -gt 0) { return $targets }
+        Write-Warning 'No agy.exe or language_server*.exe found at that path.'
+    }
+}
+
+function Find-AntigravityMarkerOffsets {
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$Haystack,
+        [Parameter(Mandatory = $true)][byte[]]$Needle
+    )
+    $found = New-Object System.Collections.Generic.List[int]
+    if ($Needle.Length -eq 0 -or $Haystack.Length -lt $Needle.Length) { return @($found) }
+    $offset = 0
+    while ($offset -le ($Haystack.Length - $Needle.Length)) {
+        $hit = [Array]::IndexOf($Haystack, $Needle[0], $offset)
+        if ($hit -lt 0 -or $hit -gt ($Haystack.Length - $Needle.Length)) { break }
+        $matched = $true
+        for ($j = 1; $j -lt $Needle.Length; $j++) {
+            if ($Haystack[$hit + $j] -ne $Needle[$j]) {
+                $matched = $false
+                break
+            }
+        }
+        if ($matched) {
+            [void]$found.Add($hit)
+            $offset = $hit + $Needle.Length
+        } else {
+            $offset = $hit + 1
+        }
+    }
+    return @($found)
+}
+
+function Set-AntigravityBinaryPatch {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][byte[]]$From,
+        [Parameter(Mandatory = $true)][byte[]]$To
+    )
+    if ($From.Length -ne $To.Length) {
+        throw "Antigravity patch markers have different lengths: $($From.Length) and $($To.Length)."
+    }
+
+    Write-Host "  reading $([IO.Path]::GetFileName($Path))..." -ForegroundColor DarkCyan
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $originalLength = $bytes.LongLength
+    $hits = @(Find-AntigravityMarkerOffsets -Haystack $bytes -Needle $From)
+    foreach ($hit in $hits) {
+        [Buffer]::BlockCopy($To, 0, $bytes, $hit, $To.Length)
+    }
+
+    if ($hits.Count -eq 0) { return 0 }
+    if ($bytes.LongLength -ne $originalLength) {
+        throw "Patch would change the size of '$Path'. Write cancelled."
+    }
+
+    $backup = "$Path.bak"
+    if (-not (Test-Path -LiteralPath $backup)) {
+        Write-Host '  writing backup...' -ForegroundColor DarkCyan
+        Copy-Item -LiteralPath $Path -Destination $backup -ErrorAction Stop
+    }
+    Write-Host '  writing patched file...' -ForegroundColor DarkCyan
+    [System.IO.File]::WriteAllBytes($Path, $bytes)
+    return $hits.Count
+}
+
+function Invoke-AntigravityBinaryPatch {
+    param([ValidateSet('Apply', 'Rollback')][string]$Direction = 'Apply')
+
+    if ($script:AntigravityPatchFrom.Length -ne $script:AntigravityPatchTo.Length) {
+        throw 'Antigravity patch markers must be the same length.'
+    }
+    $from = if ($Direction -eq 'Apply') { $script:AntigravityPatchFrom } else { $script:AntigravityPatchTo }
+    $to = if ($Direction -eq 'Apply') { $script:AntigravityPatchTo } else { $script:AntigravityPatchFrom }
+    $label = if ($Direction -eq 'Apply') { 'Patch' } else { 'Rollback' }
+
+    $targets = @(Get-AntigravityPatchTargets)
+    if ($targets.Count -eq 0) {
+        $targets = @(Read-AntigravityPatchTargets)
+    }
+    if ($targets.Count -eq 0) {
+        return $false
+    }
+
+    $changed = 0
+    $index = 0
+    foreach ($file in $targets) {
+        $index++
+        try {
+            Write-Host ("[{0}/{1}] {2}" -f $index, $targets.Count, $file.FullName) -ForegroundColor Cyan
+            Write-Host "  reading $($file.Name)..." -ForegroundColor DarkCyan
+            $current = [System.IO.File]::ReadAllBytes($file.FullName)
+            $already = @(Find-AntigravityMarkerOffsets -Haystack $current -Needle $to)
+            if ($already.Count -gt 0) {
+                Write-Host "  [OK] $($file.Name) is already in the requested state" -ForegroundColor Green
+                continue
+            }
+            $pending = @(Find-AntigravityMarkerOffsets -Haystack $current -Needle $from)
+            if ($pending.Count -eq 0) {
+                Write-Warning "  $($file.FullName): marker not found, file skipped."
+                continue
+            }
+
+            if ($from.Length -ne $to.Length) {
+                throw 'Antigravity patch markers must be the same length.'
+            }
+            foreach ($hit in $pending) {
+                [Buffer]::BlockCopy($to, 0, $current, $hit, $to.Length)
+            }
+            $backup = "$($file.FullName).bak"
+            if (-not (Test-Path -LiteralPath $backup)) {
+                Write-Host '  writing backup...' -ForegroundColor DarkCyan
+                Copy-Item -LiteralPath $file.FullName -Destination $backup -ErrorAction Stop
+            }
+            Write-Host '  writing patched file...' -ForegroundColor DarkCyan
+            [System.IO.File]::WriteAllBytes($file.FullName, $current)
+            $changed++
+            Write-Host "  [OK] $($file.Name): replacements=$($pending.Count)" -ForegroundColor Green
+        } catch {
+            Write-Warning "  $($file.FullName): $($_.Exception.Message)"
+        }
+    }
+
+    if ($changed -eq 0) {
+        Write-Host "$label did not change files (already applied, or the marker is missing)." -ForegroundColor DarkYellow
+    } else {
+        Write-Host "$label applied to $changed Antigravity file(s). File sizes were not changed." -ForegroundColor Green
+    }
+    return ($changed -gt 0)
+}
+
 function Set-AntigravityShortcutRouting {
+
     param([object]$State)
 
     $antigravityPath = Get-AntigravityExecutablePath
@@ -1103,6 +1445,7 @@ function Enable-Transport {
         Start-TransportProcess
         Test-LocalTransport -YouTubeEnabled $youtubeEnabled
         Set-AntigravityShortcutRouting -State $state
+        Invoke-AntigravityBinaryPatch -Direction Apply | Out-Null
         Remove-Item -LiteralPath $script:WatchdogStatePath -Force -ErrorAction SilentlyContinue
         Write-Host ''
         Write-Host '========================================' -ForegroundColor Green
@@ -1159,6 +1502,7 @@ function Refresh-Transport {
         Start-TransportProcess
         Test-LocalTransport -YouTubeEnabled $youtubeEnabled
         Set-AntigravityShortcutRouting -State $state
+        Invoke-AntigravityBinaryPatch -Direction Apply | Out-Null
         Remove-Item -LiteralPath $script:WatchdogStatePath -Force -ErrorAction SilentlyContinue
         Write-Host ''
         Write-Host '========================================' -ForegroundColor Green
@@ -1300,9 +1644,11 @@ function Show-Menu {
         Write-Host '  4. Download/apply latest update and restart'
         $state = Read-JsonFile -Path $script:StatePath
         $youtubeAction = if (Test-YouTubeRoutingEnabled -State $state) { 'Disable' } else { 'Enable' }
-        Write-Host ("  5. {0} YouTube routing" -f $youtubeAction)
+        Write-Host '  5. Enable/disable YouTube routing'
+        Write-Host '  6. Patch Antigravity binaries'
+        Write-Host '  7. Roll back Antigravity binary patch'
         Write-Host ''
-        $selection = Read-Host 'Select 1-5'
+        $selection = Read-Host 'Select 1-7'
         try {
             switch ($selection) {
                 '1' { Enable-Transport; break }
@@ -1310,7 +1656,9 @@ function Show-Menu {
                 '3' { Disable-Transport; break }
                 '4' { Update-AndRefreshTransport; break }
                 '5' { Switch-YouTubeRouting; break }
-                default { Write-TransportLog WARN 'Enter 1, 2, 3, 4 or 5.'; Start-Sleep -Seconds 2; continue }
+                '6' { Invoke-AntigravityBinaryPatch -Direction Apply | Out-Null; break }
+                '7' { Invoke-AntigravityBinaryPatch -Direction Rollback | Out-Null; break }
+                default { Write-TransportLog WARN 'Enter 1, 2, 3, 4, 5, 6 or 7.'; Start-Sleep -Seconds 2; continue }
             }
         }
         catch {
@@ -1329,6 +1677,8 @@ try {
         'disable' { Disable-Transport }
         'status' { Show-TransportStatus }
         'watchdog' { Invoke-TransportWatchdog }
+        'antigravity-patch' { Invoke-AntigravityBinaryPatch -Direction Apply | Out-Null }
+        'antigravity-rollback' { Invoke-AntigravityBinaryPatch -Direction Rollback | Out-Null }
     }
 }
 catch {
