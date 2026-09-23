@@ -6,14 +6,14 @@
 
 The project includes two independent components:
 
-- Windows 10/11: a system-level transport for Gemini and Antigravity that works with standard browsers and applications;
+- Windows 10/11: a system-level transport for Gemini and Antigravity that works with standard browsers and applications, plus an optional YouTube route and a same-length binary patch for Antigravity client errors such as an ineligible account;
 - Android 7+: a standalone Gemini WebView client with its own local HTTP-to-SOCKS5 bridge.
 
 The Android app is not a VPN and does not intercept traffic from other applications. Users can keep their system VPN enabled while routing only the built-in Gemini client through SOCKS5.
 
 ## Features
 
-- a single BAT launcher for enabling the transport, replacing the SOCKS5 proxy, optionally routing YouTube, applying updates, and fully disabling the installation;
+- a single BAT launcher for enabling the transport, replacing the SOCKS5 proxy, optionally routing YouTube, patching or rolling back the Antigravity binaries, applying updates, and fully disabling the installation;
 - one machine-wide installation for all users;
 - automatic startup of the background transport as `SYSTEM` when Windows boots;
 - remote DNS resolution through SOCKS5 for protected destinations;
