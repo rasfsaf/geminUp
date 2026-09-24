@@ -7,7 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TransportVersion = '1.5.0'
+$script:TransportVersion = '1.5.1'
 $script:TaskName = 'geminUp'
 $script:WatchdogTaskName = 'geminUp Watchdog'
 $script:ListenPort = 8877
@@ -900,8 +900,14 @@ function Invoke-AntigravityBinaryPatch {
     if ($script:AntigravityPatchFrom.Length -ne $script:AntigravityPatchTo.Length) {
         throw 'Antigravity patch markers must be the same length.'
     }
-    $from = if ($Direction -eq 'Apply') { $script:AntigravityPatchFrom } else { $script:AntigravityPatchTo }
-    $to = if ($Direction -eq 'Apply') { $script:AntigravityPatchTo } else { $script:AntigravityPatchFrom }
+    # Assignment from an if-expression enumerates byte[] into Object[] on Windows PowerShell 5.1,
+    # and Buffer.BlockCopy then rejects the source as a non-primitive array.
+    $from = $script:AntigravityPatchTo
+    $to = $script:AntigravityPatchFrom
+    if ($Direction -eq 'Apply') {
+        $from = $script:AntigravityPatchFrom
+        $to = $script:AntigravityPatchTo
+    }
     $label = if ($Direction -eq 'Apply') { 'Patch' } else { 'Rollback' }
 
     $targets = @(Get-AntigravityPatchTargets)
