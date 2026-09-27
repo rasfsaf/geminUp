@@ -442,7 +442,6 @@ namespace GeminUp
         private readonly ProxyDefinition upstream;
         private readonly RouteMatcher matcher;
         private readonly FileLogger logger;
-        private readonly SemaphoreSlim slots = new SemaphoreSlim(256, 256);
         private TcpListener listener;
 
         public LocalTransport(TransportConfig configValue, ProxyDefinition proxy, FileLogger fileLogger)
@@ -465,30 +464,27 @@ namespace GeminUp
             logger.Write("OK", "Transport listening on 127.0.0.1:" + config.ListenPort.ToString(CultureInfo.InvariantCulture) + ".");
             while (true)
             {
-                await slots.WaitAsync().ConfigureAwait(false);
                 TcpClient client = null;
                 try
                 {
                     client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
-                    Task handler = HandleClientAndReleaseAsync(client);
+                    Task ignored = HandleClientFireAndForgetAsync(client);
                 }
                 catch (SocketException error)
                 {
                     if (client != null) client.Close();
-                    slots.Release();
                     logger.Write("WARN", "Listener temporarily failed: " + error.Message + ". Retrying.");
                     Thread.Sleep(1000);
                 }
                 catch
                 {
                     if (client != null) client.Close();
-                    slots.Release();
                     throw;
                 }
             }
         }
 
-        private async Task HandleClientAndReleaseAsync(TcpClient client)
+        private async Task HandleClientFireAndForgetAsync(TcpClient client)
         {
             try
             {
@@ -501,7 +497,6 @@ namespace GeminUp
             finally
             {
                 client.Close();
-                slots.Release();
             }
         }
 
