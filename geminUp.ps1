@@ -7,7 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TransportVersion = '1.5.2'
+$script:TransportVersion = '1.5.3'
 $script:TaskName = 'geminUp'
 $script:WatchdogTaskName = 'geminUp Watchdog'
 $script:ListenPort = 8877
@@ -104,7 +104,25 @@ function Initialize-InstallDirectory {
             $inheritance, $propagation, [Security.AccessControl.AccessControlType]::Allow)
         $security.AddAccessRule($rule)
     }
+
+    $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+    $usersRule = [Security.AccessControl.FileSystemAccessRule]::new(
+        $usersSid, [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+        $inheritance, $propagation, [Security.AccessControl.AccessControlType]::Allow)
+    $security.AddAccessRule($usersRule)
+
     Set-Acl -LiteralPath $script:InstallRoot -AclObject $security
+
+    Get-ChildItem -LiteralPath $script:InstallRoot -File -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            $fileAcl = Get-Acl -LiteralPath $_.FullName
+            $fileAcl.SetAccessRuleProtection($false, $false)
+            Set-Acl -LiteralPath $_.FullName -AclObject $fileAcl
+        }
+        catch {
+            # Ignore transient locks
+        }
+    }
 }
 
 function Save-JsonFile {
@@ -894,6 +912,24 @@ function Set-AntigravityBinaryPatch {
     return $hits.Count
 }
 
+function Stop-AntigravityProcesses {
+    $processNames = @('Antigravity', 'language_server', 'language_server_windows_x64', 'agy')
+    $running = @(Get-Process -Name $processNames -ErrorAction SilentlyContinue)
+    if ($running.Count -gt 0) {
+        Write-Host "Closing $($running.Count) running Antigravity process(es) to release binary locks..." -ForegroundColor Cyan
+        foreach ($proc in $running) {
+            try {
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                $proc.WaitForExit(3000) | Out-Null
+            }
+            catch {
+                # Ignore processes that have already terminated
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 function Invoke-AntigravityBinaryPatch {
     param([ValidateSet('Apply', 'Rollback')][string]$Direction = 'Apply')
 
@@ -917,6 +953,8 @@ function Invoke-AntigravityBinaryPatch {
     if ($targets.Count -eq 0) {
         return $false
     }
+
+    Stop-AntigravityProcesses
 
     $changed = 0
     $index = 0
@@ -949,9 +987,27 @@ function Invoke-AntigravityBinaryPatch {
                 Copy-Item -LiteralPath $file.FullName -Destination $backup -ErrorAction Stop
             }
             Write-Host '  writing patched file...' -ForegroundColor DarkCyan
-            [System.IO.File]::WriteAllBytes($file.FullName, $current)
-            $changed++
-            Write-Host "  [OK] $($file.Name): replacements=$($pending.Count)" -ForegroundColor Green
+            $written = $false
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                try {
+                    [System.IO.File]::WriteAllBytes($file.FullName, $current)
+                    $written = $true
+                    break
+                }
+                catch [System.IO.IOException] {
+                    if ($attempt -lt 3) {
+                        Stop-AntigravityProcesses
+                        Start-Sleep -Milliseconds 500
+                    }
+                    else {
+                        throw
+                    }
+                }
+            }
+            if ($written) {
+                $changed++
+                Write-Host "  [OK] $($file.Name): replacements=$($pending.Count)" -ForegroundColor Green
+            }
         } catch {
             Write-Warning "  $($file.FullName): $($_.Exception.Message)"
         }

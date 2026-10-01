@@ -70,7 +70,8 @@ namespace GeminUp
             "*.antigravity.google",
             "cloudcode-pa.googleapis.com",
             "daily-cloudcode-pa.googleapis.com",
-            "*.cloudcode-pa.googleapis.com"
+            "*.cloudcode-pa.googleapis.com",
+            "*.googleapis.com"
         };
 
         public static ProxyDefinition ParseProxy(string input)

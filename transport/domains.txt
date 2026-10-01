@@ -32,3 +32,4 @@ cloudcode-pa.googleapis.com
 daily-cloudcode-pa.googleapis.com
 *.cloudcode-pa.googleapis.com
 www.googleapis.com
+*.googleapis.com

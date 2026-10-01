@@ -269,6 +269,60 @@ internal static class AntigravityProbe
         throw 'YouTube routing must be disabled in the default domain configuration.'
     }
 
+    $testInstallRoot = Join-Path $resolvedTestRoot 'acl-install-test'
+    New-Item -ItemType Directory -Path $testInstallRoot -Force | Out-Null
+    $testChildFile = Join-Path $testInstallRoot 'geminUp.exe'
+    Set-Content -LiteralPath $testChildFile -Value 'binary' -Encoding utf8
+
+    $dirSecurity = [Security.AccessControl.DirectorySecurity]::new()
+    $dirSecurity.SetAccessRuleProtection($true, $false)
+    $aclInheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $aclPropagation = [Security.AccessControl.PropagationFlags]::None
+    foreach ($sidValue in @('S-1-5-18', 'S-1-5-32-544')) {
+        $sid = [Security.Principal.SecurityIdentifier]::new($sidValue)
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid, [Security.AccessControl.FileSystemRights]::FullControl,
+            $aclInheritance, $aclPropagation, [Security.AccessControl.AccessControlType]::Allow)
+        $dirSecurity.AddAccessRule($rule)
+    }
+    $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+    $usersRule = [Security.AccessControl.FileSystemAccessRule]::new(
+        $usersSid, [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+        $aclInheritance, $aclPropagation, [Security.AccessControl.AccessControlType]::Allow)
+    $dirSecurity.AddAccessRule($usersRule)
+    Set-Acl -LiteralPath $testInstallRoot -AclObject $dirSecurity
+
+    Get-ChildItem -LiteralPath $testInstallRoot -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $fileAcl = Get-Acl -LiteralPath $_.FullName
+        $fileAcl.SetAccessRuleProtection($false, $false)
+        Set-Acl -LiteralPath $_.FullName -AclObject $fileAcl
+    }
+
+    $dirAccess = (Get-Acl -LiteralPath $testInstallRoot).Access
+    $fileAccess = (Get-Acl -LiteralPath $testChildFile).Access
+    $hasUsersDir = $false
+    foreach ($ace in $dirAccess) {
+        if ($ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-545' -and
+            $ace.FileSystemRights.HasFlag([Security.AccessControl.FileSystemRights]::ReadAndExecute)) {
+            $hasUsersDir = $true
+            break
+        }
+    }
+    if (-not $hasUsersDir) {
+        throw 'Directory ACL is missing ReadAndExecute for BUILTIN\Users (S-1-5-32-545).'
+    }
+    $hasUsersFile = $false
+    foreach ($ace in $fileAccess) {
+        if ($ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-545' -and
+            $ace.FileSystemRights.HasFlag([Security.AccessControl.FileSystemRights]::ReadAndExecute)) {
+            $hasUsersFile = $true
+            break
+        }
+    }
+    if (-not $hasUsersFile) {
+        throw 'Child file ACL is missing inherited ReadAndExecute for BUILTIN\Users (S-1-5-32-545).'
+    }
+
     $effectiveDomainsPath = Join-Path $resolvedTestRoot 'domains-with-youtube.txt'
     $effectiveDomains = @(
         Get-Content -LiteralPath $domainsPath -Encoding UTF8

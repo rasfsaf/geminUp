@@ -20,7 +20,7 @@ The Android app is not a VPN and does not intercept traffic from other applicati
 - fail-closed behavior: when SOCKS5 is unavailable, protected connections receive HTTP 502 with no direct fallback;
 - SOCKS5 authentication;
 - configuration encryption with Windows DPAPI `LocalMachine`;
-- data-directory ACLs restricted to `SYSTEM` and local administrators;
+- data-directory ACLs: full control restricted to `SYSTEM` and administrators, with read and execute access for users;
 - preservation and restoration of previous system proxy and browser policies;
 - disabling of unproxied WebRTC and QUIC in supported browsers;
 - a separate bootstrap script for downloading a verified release ZIP;
