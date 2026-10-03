@@ -1,4 +1,4 @@
-[English](README.md) | **Русский**
+[Русский](README.ru.md) | [English](README.md#geminup---english)
 
 # geminUp
 
