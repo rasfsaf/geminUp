@@ -212,6 +212,14 @@ public class MainActivity extends Activity {
             "    PatchedDTF.supportedLocalesOf = OrigDTF.supportedLocalesOf.bind(OrigDTF);" +
             "    PatchedDTF.prototype.resolvedOptions = function() { const o = OrigDTF.prototype.resolvedOptions.call(this); o.timeZone = TARGET_TIMEZONE; return o; };" +
             "    try { Intl.DateTimeFormat = PatchedDTF; } catch(e) {}" +
+            "    try {" +
+            "      if (!document.getElementById('geminup-perf-style')) {" +
+            "        const s = document.createElement('style');" +
+            "        s.id = 'geminup-perf-style';" +
+            "        s.textContent = '* { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }';" +
+            "        (document.head || document.documentElement).appendChild(s);" +
+            "      }" +
+            "    } catch(e) {}" +
             "  } catch(err) { console.error('Spoof injection error:', err); }" +
             "})();";
     }
@@ -419,7 +427,11 @@ public class MainActivity extends Activity {
         settings.setAllowFileAccess(true);
         settings.setGeolocationEnabled(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
-        settings.setUserAgentString("Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36");
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        settings.setUseWideViewPort(true);
+        settings.setLoadWithOverviewMode(true);
+        settings.setUserAgentString("Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36");
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
@@ -448,12 +460,8 @@ public class MainActivity extends Activity {
                 if (request != null && request.getUrl() != null) {
                     String url = request.getUrl().toString();
                     String currentLocale = (currentGeoProfile != null) ? currentGeoProfile.locale : "en-US";
-                    if (url.contains("hl=ru") || (url.contains("gemini.google.com") && !url.contains("hl="))) {
-                        if (url.contains("hl=")) {
-                            url = url.replaceAll("hl=[^&]+", "hl=" + currentLocale);
-                        } else {
-                            url = url + (url.contains("?") ? "&hl=" + currentLocale : "?hl=" + currentLocale);
-                        }
+                    if (url.contains("hl=ru")) {
+                        url = url.replaceAll("hl=ru", "hl=" + currentLocale);
                         Map<String, String> headers = new HashMap<>();
                         headers.put("Accept-Language", (currentGeoProfile != null) ? currentGeoProfile.getAcceptLanguageHeader() : "en-US,en;q=0.9");
                         view.loadUrl(url, headers);
@@ -644,7 +652,7 @@ public class MainActivity extends Activity {
                 if (proxyGeneration.get() == generation && webView != null && !isFinishing()) {
                     String currentUrl = webView.getUrl();
                     webView.evaluateJavascript(buildSpoofJs(finalProfile), null);
-                    if (currentUrl == null || currentUrl.contains("gemini.google.com")) {
+                    if (currentUrl == null || "about:blank".equals(currentUrl)) {
                         loadInitialUrl();
                     }
                 }
@@ -1052,7 +1060,7 @@ public class MainActivity extends Activity {
             upstream.setTcpNoDelay(true);
             upstream.setKeepAlive(true);
             upstream.connect(new InetSocketAddress(socksHost, socksPort), timeoutMs);
-            upstream.setSoTimeout(30000);
+            upstream.setSoTimeout(15000);
 
             InputStream sIn = upstream.getInputStream();
             OutputStream sOut = upstream.getOutputStream();
@@ -1132,7 +1140,7 @@ public class MainActivity extends Activity {
             try {
                 client.setTcpNoDelay(true);
                 client.setKeepAlive(true);
-                client.setSoTimeout(30000);
+                client.setSoTimeout(15000);
                 InputStream in = client.getInputStream();
                 OutputStream out = client.getOutputStream();
 
@@ -1228,10 +1236,8 @@ public class MainActivity extends Activity {
                 Socket finalUpstream = upstreamSocks;
                 Socket finalClient = client;
 
-                Thread t1 = new Thread(() -> pipe(in, sOut, finalClient, finalUpstream));
-                Thread t2 = new Thread(() -> pipe(sIn, out, finalUpstream, finalClient));
-                t1.start();
-                t2.start();
+                executor.submit(() -> pipe(in, sOut, finalClient, finalUpstream));
+                executor.submit(() -> pipe(sIn, out, finalUpstream, finalClient));
             } catch (Exception e) {
                 Log.w(TAG, "Local bridge client handler error.", e);
                 try {
