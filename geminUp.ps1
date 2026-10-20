@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status', 'watchdog', 'antigravity-patch', 'antigravity-rollback')]
+    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status', 'watchdog', 'antigravity-patch', 'antigravity-rollback', 'argon-menu', 'argon-enable', 'argon-disable', 'argon-status', 'argon-cookie', 'argon-test')]
     [string]$Action = 'menu'
 )
 
@@ -35,6 +35,17 @@ $script:AntigravityPatchFileNames = @(
     'language_server.exe',
     'language_server_windows_x64.exe'
 )
+$script:ArgonTaskName = 'geminUp Argon Bridge'
+$script:ArgonListenPort = 8083
+$script:ArgonDir = Join-Path $script:InstallRoot 'argon'
+$script:ArgonExecutablePath = Join-Path $script:ArgonDir 'gemini-web2api.exe'
+$script:ArgonConfigPath = Join-Path $script:ArgonDir 'argon-config.json'
+$script:ArgonDbPath = Join-Path $script:ArgonDir 'gemini.db'
+$script:ArgonPidPath = Join-Path $script:ArgonDir 'argon.pid'
+$script:ArgonLogPath = Join-Path $script:ArgonDir 'argon.log'
+$script:ArgonVersion = 'v4.23.0'
+$script:ArgonDownloadUri = "https://github.com/zexadev/gemini-web2api-go/releases/download/$($script:ArgonVersion)/gemini-web2api-go_$($script:ArgonVersion)_windows_amd64.exe"
+$script:ArgonSha256 = 'c26d00b3bd0d85f3808455d316423d5ace135b3e20a0106e240415c62ae877a1'
 
 function Write-TransportLog {
     param(
@@ -1486,6 +1497,11 @@ function Show-TransportStatus {
     Write-Host ('  YouTube:       {0}' -f $(if ($youtubeEnabled) { 'enabled' } else { 'disabled' }))
     $task = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
     Write-Host ('  Autostart:     {0}' -f ($null -ne $task))
+    $argonStatus = Get-ArgonBridgeStatus
+    if ($argonStatus.Installed -or $argonStatus.Listening) {
+        $argonLabel = if ($argonStatus.Listening) { "running (PID $($argonStatus.Pid))" } else { 'stopped' }
+        Write-Host ('  Argon bridge:  {0} on port {1}' -f $argonLabel, $script:ArgonListenPort)
+    }
 }
 
 function Enable-Transport {
@@ -1695,6 +1711,470 @@ function Disable-Transport {
     Write-TransportLog OK 'geminUp disabled. Encrypted SOCKS5 credentials removed.'
 }
 
+function Initialize-ArgonDirectory {
+    if (-not (Test-Path -LiteralPath $script:ArgonDir)) {
+        New-Item -ItemType Directory -Path $script:ArgonDir -Force | Out-Null
+    }
+}
+
+function Test-ArgonListener {
+    param([int]$TimeoutMilliseconds = 500)
+
+    $client = [Net.Sockets.TcpClient]::new()
+    $async = $null
+    try {
+        $async = $client.BeginConnect('127.0.0.1', $script:ArgonListenPort, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) {
+            return $false
+        }
+        $client.EndConnect($async)
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($null -ne $async) {
+            $async.AsyncWaitHandle.Close()
+        }
+        $client.Close()
+    }
+}
+
+function Get-ArgonBridgeStatus {
+    $installed = Test-Path -LiteralPath $script:ArgonExecutablePath -PathType Leaf
+    $listening = Test-ArgonListener -TimeoutMilliseconds 300
+    $running = $false
+    $pidValue = 0
+
+    if (Test-Path -LiteralPath $script:ArgonPidPath) {
+        $rawPid = Get-Content -LiteralPath $script:ArgonPidPath -Raw -Encoding utf8 -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace($rawPid) -and [int]::TryParse($rawPid.Trim(), [ref]$pidValue)) {
+            $proc = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
+            if ($null -ne $proc -and -not $proc.HasExited) {
+                $running = $true
+            }
+        }
+    }
+
+    if (-not $running -and $listening) {
+        $procs = @(Get-Process -Name 'gemini-web2api' -ErrorAction SilentlyContinue)
+        if ($procs.Count -gt 0) {
+            $running = $true
+            $pidValue = $procs[0].Id
+        }
+    }
+
+    $cookieConfigured = $false
+    if ($listening) {
+        try {
+            $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/admin/api/cookies" -Method Get -TimeoutSec 2 -ErrorAction Stop
+            if ($null -ne $resp -and ($resp.PSObject.Properties.Name -contains 'total') -and [int]$resp.total -gt 0) {
+                $cookieConfigured = $true
+            }
+        }
+        catch { }
+    }
+
+    return [PSCustomObject]@{
+        Installed = $installed
+        Running = $running
+        Listening = $listening
+        Pid = $pidValue
+        CookieConfigured = $cookieConfigured
+    }
+}
+
+function Install-ArgonBinary {
+    Initialize-ArgonDirectory
+
+    if (Test-Path -LiteralPath $script:ArgonExecutablePath -PathType Leaf) {
+        try {
+            $hash = (Get-FileHash -LiteralPath $script:ArgonExecutablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -eq $script:ArgonSha256.ToLowerInvariant()) {
+                Write-TransportLog OK 'Native Argon bridge executable is verified and ready.'
+                return
+            }
+            Write-TransportLog WARN 'Existing binary hash mismatch; re-downloading official release...'
+        }
+        catch {
+            Write-TransportLog WARN "Could not verify existing binary hash: $($_.Exception.Message)"
+        }
+    }
+
+    Write-TransportLog INFO "Downloading official native Argon bridge ($($script:ArgonVersion))..."
+    $tempFile = Join-Path $script:ArgonDir ("gemini-web2api-download-" + [Guid]::NewGuid().ToString('N') + ".exe")
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+        $webClient = [Net.WebClient]::new()
+        try {
+            $webClient.DownloadFile($script:ArgonDownloadUri, $tempFile)
+        }
+        finally {
+            $webClient.Dispose()
+        }
+
+        $downloadedHash = (Get-FileHash -LiteralPath $tempFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($downloadedHash -ne $script:ArgonSha256.ToLowerInvariant()) {
+            throw "Downloaded binary SHA-256 hash mismatch: expected $($script:ArgonSha256), got $downloadedHash."
+        }
+
+        Stop-ArgonBridge -Silent
+        Move-Item -LiteralPath $tempFile -Destination $script:ArgonExecutablePath -Force
+        Write-TransportLog OK "Argon binary installed and verified: $script:ArgonExecutablePath"
+    }
+    catch {
+        if (Test-Path -LiteralPath $tempFile) {
+            Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
+        }
+        throw "Failed to download native Argon bridge: $($_.Exception.Message)"
+    }
+}
+
+function Save-ArgonConfigFile {
+    Initialize-ArgonDirectory
+    $cfg = @{
+        port = $script:ArgonListenPort
+        host = '127.0.0.1'
+        default_model = 'gemini-4-argon'
+        log_requests = $true
+        db_path = $script:ArgonDbPath
+        admin_token = ''
+        admin_enabled = $true
+        temporary_chat = $true
+        multi_turn = $false
+        gemini_bl_auto = $true
+        impersonate = 'chrome_146'
+    }
+    $json = ConvertTo-Json -InputObject $cfg -Depth 4
+    [IO.File]::WriteAllText($script:ArgonConfigPath, $json, [Text.UTF8Encoding]::new($false))
+}
+
+function Start-ArgonBridge {
+    Assert-SupportedWindows
+    Assert-Administrator
+
+    Install-ArgonBinary
+    Save-ArgonConfigFile
+
+    $status = Get-ArgonBridgeStatus
+    if ($status.Running -and $status.Listening) {
+        Write-TransportLog OK "Argon bridge is already running (PID: $($status.Pid))."
+        return
+    }
+
+    Stop-ArgonBridge -Silent
+
+    $arguments = @(
+        '--config', ('"{0}"' -f $script:ArgonConfigPath),
+        '--port', $script:ArgonListenPort
+    )
+
+    if (Test-TransportListener -TimeoutMilliseconds 300) {
+        $arguments += @('--proxy', ("socks5://127.0.0.1:$script:ListenPort"))
+        Write-TransportLog INFO "Routing Argon bridge upstream via local geminUp SOCKS5 (127.0.0.1:$script:ListenPort)."
+    }
+    else {
+        Write-TransportLog INFO 'geminUp SOCKS5 is not running; Argon bridge will connect directly.'
+    }
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $script:ArgonExecutablePath
+    $startInfo.Arguments = ($arguments -join ' ')
+    $startInfo.WorkingDirectory = $script:ArgonDir
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.CreateNoWindow = $true
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $false
+    $startInfo.RedirectStandardError = $false
+
+    $proc = [Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $proc) {
+        throw 'Failed to start Argon bridge process.'
+    }
+
+    [IO.File]::WriteAllText($script:ArgonPidPath, $proc.Id.ToString(), [Text.UTF8Encoding]::new($false))
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    $ready = $false
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-ArgonListener -TimeoutMilliseconds 300) {
+            $ready = $true
+            break
+        }
+        Start-Sleep -Milliseconds 300
+    }
+
+    if (-not $ready) {
+        Stop-ArgonBridge -Silent
+        throw 'Argon bridge started, but listener did not respond on port 8083 within 10 seconds.'
+    }
+
+    try {
+        $taskAction = New-ScheduledTaskAction -Execute $script:ArgonExecutablePath -Argument ($arguments -join ' ') -WorkingDirectory $script:ArgonDir
+        $triggers = @(
+            New-ScheduledTaskTrigger -AtStartup
+            New-ScheduledTaskTrigger -AtLogOn
+        )
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+            -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
+            -MultipleInstances IgnoreNew -StartWhenAvailable
+        Register-ScheduledTask -TaskName $script:ArgonTaskName -Action $taskAction -Trigger $triggers `
+            -Principal $principal -Settings $settings -Description 'geminUp native Gemini 4 Argon bridge daemon.' `
+            -Force | Out-Null
+    }
+    catch {
+        Write-TransportLog WARN "Could not register scheduled task: $($_.Exception.Message)"
+    }
+
+    Write-TransportLog OK "Argon bridge started successfully on http://127.0.0.1:$($script:ArgonListenPort)/v1 (PID: $($proc.Id))."
+}
+
+function Stop-ArgonBridge {
+    param([switch]$Silent)
+
+    try {
+        Unregister-ScheduledTask -TaskName $script:ArgonTaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    } catch { }
+
+    $stoppedAny = $false
+    if (Test-Path -LiteralPath $script:ArgonPidPath) {
+        try {
+            $rawPid = Get-Content -LiteralPath $script:ArgonPidPath -Raw -Encoding utf8
+            $pidValue = 0
+            if ([int]::TryParse($rawPid.Trim(), [ref]$pidValue)) {
+                $proc = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
+                if ($null -ne $proc -and -not $proc.HasExited) {
+                    $proc.Kill()
+                    $proc.WaitForExit(3000) | Out-Null
+                    $stoppedAny = $true
+                }
+            }
+        }
+        catch { }
+        finally {
+            Remove-Item -LiteralPath $script:ArgonPidPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $lingering = @(Get-Process -Name 'gemini-web2api' -ErrorAction SilentlyContinue)
+    foreach ($p in $lingering) {
+        try {
+            $p.Kill()
+            $p.WaitForExit(2000) | Out-Null
+            $stoppedAny = $true
+        } catch { }
+    }
+
+    if (-not $Silent) {
+        if ($stoppedAny) {
+            Write-TransportLog OK 'Argon bridge process stopped.'
+        } else {
+            Write-TransportLog INFO 'Argon bridge is not running.'
+        }
+    }
+}
+
+function Set-ArgonCookie {
+    Assert-SupportedWindows
+    Assert-Administrator
+
+    Write-Host ''
+    Write-Host '==================================================' -ForegroundColor Cyan
+    Write-Host '  Connect Google Account Cookie for Gemini 4 Argon' -ForegroundColor Cyan
+    Write-Host '==================================================' -ForegroundColor Cyan
+    Write-Host '1. In browser, log in to gemini.google.com with your Pro/paid Google account.' -ForegroundColor Yellow
+    Write-Host '2. Press F12 -> Network tab -> F5 -> find any request (e.g. batchexecute).' -ForegroundColor Yellow
+    Write-Host '3. Copy Request Headers -> "Cookie" value and paste it here.' -ForegroundColor Yellow
+    Write-Host '   (Required items: __Secure-1PSID, __Secure-1PSIDTS, etc.)' -ForegroundColor DarkGray
+    Write-Host ''
+
+    $cookie = Read-Host 'Paste Cookie'
+    if ([string]::IsNullOrWhiteSpace($cookie)) {
+        Write-TransportLog WARN 'Cookie input was empty. Operation cancelled.'
+        return
+    }
+
+    if ($cookie -notmatch '__Secure-1PSID' -and $cookie -notmatch 'SID=') {
+        Write-TransportLog WARN 'Warning: the pasted string does not appear to contain standard Google SID cookies.'
+        $proceed = Read-Host 'Proceed anyway? (y/N)'
+        if ($proceed -notmatch '^(?i)y') {
+            Write-TransportLog WARN 'Cancelled.'
+            return
+        }
+    }
+
+    $status = Get-ArgonBridgeStatus
+    if (-not $status.Listening) {
+        Write-TransportLog INFO 'Starting Argon bridge daemon first...'
+        Start-ArgonBridge
+    }
+
+    $body = @{
+        label = 'GoogleProAccount'
+        cookie = $cookie.Trim()
+        note = ('Added via geminUp on ' + (Get-Date).ToString('yyyy-MM-dd HH:mm'))
+    } | ConvertTo-Json
+
+    try {
+        $addResp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/admin/api/cookies" `
+            -Method Post -Body $body -ContentType 'application/json; charset=utf-8' -TimeoutSec 10 -ErrorAction Stop
+
+        $acctId = $addResp.id
+        Write-TransportLog OK "Account cookie saved (Account ID: $acctId)."
+
+        Write-TransportLog INFO 'Checking cookie health with Google servers...'
+        $checkResp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/admin/api/cookies/$acctId/check" `
+            -Method Post -TimeoutSec 15 -ErrorAction Stop
+
+        if ($null -ne $checkResp -and ($checkResp.PSObject.Properties.Name -contains 'ok') -and $checkResp.ok -eq $true) {
+            Write-TransportLog OK 'Cookie verified successfully! Gemini 4 Argon is unlocked and active.'
+        }
+        else {
+            $msg = if ($null -ne $checkResp -and ($checkResp.PSObject.Properties.Name -contains 'detail')) { $checkResp.detail } else { 'Validation error' }
+            Write-TransportLog WARN "Cookie check response: $msg (Check if your account has Gemini Pro/Argon access on gemini.google.com)."
+        }
+    }
+    catch {
+        Write-TransportLog ERROR "Failed to configure cookie via bridge API: $($_.Exception.Message)"
+    }
+}
+
+function Test-ArgonPipeline {
+    $status = Get-ArgonBridgeStatus
+    if (-not $status.Listening) {
+        Write-TransportLog WARN 'Argon bridge is not running. Select option 1 to start it first.'
+        return
+    }
+
+    Write-TransportLog INFO "Checking available models on http://127.0.0.1:$($script:ArgonListenPort)/v1/models..."
+    try {
+        $modelsResp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/v1/models" -Method Get -TimeoutSec 5 -ErrorAction Stop
+        $modelIds = @()
+        if ($null -ne $modelsResp -and ($modelsResp.PSObject.Properties.Name -contains 'data')) {
+            $modelIds = @($modelsResp.data | Select-Object -ExpandProperty id)
+        }
+        Write-TransportLog OK "Available models: $($modelIds -join ', ')"
+
+        if ($modelIds -contains 'gemini-4-argon' -or $modelIds -contains 'gemini-4-argon-thinking-medium') {
+            Write-TransportLog OK 'gemini-4-argon is present in model catalog!'
+        }
+        else {
+            Write-TransportLog WARN 'gemini-4-argon is not listed yet (make sure a valid Google Pro cookie is imported).'
+        }
+
+        Write-TransportLog INFO 'Sending test prompt to gemini-4-argon...'
+        $payload = @{
+            model = 'gemini-4-argon'
+            messages = @(
+                @{ role = 'user'; content = 'Respond with the single word: OK' }
+            )
+            max_tokens = 10
+        } | ConvertTo-Json
+
+        $chatResp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/v1/chat/completions" `
+            -Method Post -Body $payload -ContentType 'application/json; charset=utf-8' -TimeoutSec 20 -ErrorAction Stop
+
+        $reply = ''
+        $actualModel = ''
+        if ($null -ne $chatResp -and ($chatResp.PSObject.Properties.Name -contains 'choices') -and $chatResp.choices.Count -gt 0) {
+            $reply = $chatResp.choices[0].message.content
+        }
+        if ($null -ne $chatResp -and ($chatResp.PSObject.Properties.Name -contains 'model')) {
+            $actualModel = $chatResp.model
+        }
+
+        Write-Host ''
+        Write-Host '--- Argon Test Response ---' -ForegroundColor Green
+        Write-Host "Model used: $actualModel" -ForegroundColor Cyan
+        Write-Host "Reply:      $reply" -ForegroundColor White
+        Write-Host '---------------------------' -ForegroundColor Green
+
+        if ($actualModel -eq 'gemini-4-argon') {
+            Write-TransportLog OK 'SUCCESS: Gemini 4 Argon is working natively without downgrade!'
+        }
+        elseif ($actualModel -match 'flash-lite') {
+            Write-TransportLog WARN "Response was silently downgraded to $actualModel. Verify that the configured Google account has Pro/Ultra access with Gemini 4 Argon visible on gemini.google.com."
+        }
+    }
+    catch {
+        Write-TransportLog ERROR "Test failed: $($_.Exception.Message)"
+    }
+}
+
+function Show-ArgonConnectionInfo {
+    Write-Host ''
+    Write-Host '==================================================' -ForegroundColor Cyan
+    Write-Host '  How to Use Gemini 4 Argon in Antigravity / IDE' -ForegroundColor Cyan
+    Write-Host '==================================================' -ForegroundColor Cyan
+    Write-Host 'The bridge provides a standard OpenAI-compatible API on:' -ForegroundColor White
+    Write-Host "  Endpoint: http://127.0.0.1:$($script:ArgonListenPort)/v1" -ForegroundColor Green
+    Write-Host '  API Key:  (any string, e.g. "geminup")' -ForegroundColor Green
+    Write-Host '  Models:   gemini-4-argon' -ForegroundColor Green
+    Write-Host '            gemini-4-argon-thinking-medium' -ForegroundColor Green
+    Write-Host '            gemini-3.8-flash' -ForegroundColor Green
+    Write-Host ''
+    Write-Host 'Connecting in Roo Code / Cline / Continue / Cursor / OpenCode:' -ForegroundColor Yellow
+    Write-Host '  1. Open Extensions -> Settings (Roo Code / Cline / etc.)'
+    Write-Host '  2. Provider: OpenAI Compatible'
+    Write-Host "  3. Base URL: http://127.0.0.1:$($script:ArgonListenPort)/v1"
+    Write-Host '  4. API Key: geminup'
+    Write-Host '  5. Model ID: gemini-4-argon'
+    Write-Host ''
+    Write-Host 'Admin Dashboard (Web UI):' -ForegroundColor Yellow
+    Write-Host "  http://127.0.0.1:$($script:ArgonListenPort)/admin" -ForegroundColor Cyan
+    Write-Host ''
+}
+
+function Show-ArgonMenu {
+    while ($true) {
+        Clear-Host
+        $status = Get-ArgonBridgeStatus
+        $statusLabel = if ($status.Listening) { "RUNNING (PID: $($status.Pid))" } else { 'STOPPED' }
+        $statusColor = if ($status.Listening) { 'Green' } else { 'Yellow' }
+        $cookieLabel = if ($status.CookieConfigured) { 'CONFIGURED' } else { 'NOT SET' }
+        $cookieColor = if ($status.CookieConfigured) { 'Green' } else { 'Yellow' }
+        $transportRoute = if (Test-TransportListener -TimeoutMilliseconds 250) { "SOCKS5 (127.0.0.1:$script:ListenPort)" } else { 'Direct' }
+
+        Write-Host '==================================================' -ForegroundColor Cyan
+        Write-Host '  Gemini 4 Argon Pipeline (Native Windows Bridge)' -ForegroundColor Cyan
+        Write-Host '==================================================' -ForegroundColor Cyan
+        Write-Host -NoNewline '  Bridge Status: '
+        Write-Host $statusLabel -ForegroundColor $statusColor
+        Write-Host -NoNewline '  Google Cookie: '
+        Write-Host $cookieLabel -ForegroundColor $cookieColor
+        Write-Host "  Upstream:      $transportRoute" -ForegroundColor White
+        Write-Host "  Local URL:     http://127.0.0.1:$($script:ArgonListenPort)/v1" -ForegroundColor DarkGray
+        Write-Host ''
+        Write-Host '  1. Enable / Start Argon Bridge'
+        Write-Host '  2. Connect / Update Gemini Web Cookie'
+        Write-Host '  3. Test Argon Model Status & Ping'
+        Write-Host '  4. Stop Argon Bridge'
+        Write-Host '  5. Connection Instructions for IDE'
+        Write-Host '  6. Return to main menu'
+        Write-Host ''
+
+        $sub = Read-Host 'Select 1-6'
+        try {
+            switch ($sub) {
+                '1' { Start-ArgonBridge; Start-Sleep -Seconds 2; break }
+                '2' { Set-ArgonCookie; Start-Sleep -Seconds 2; break }
+                '3' { Test-ArgonPipeline; Read-Host 'Press Enter to continue'; break }
+                '4' { Stop-ArgonBridge; Start-Sleep -Seconds 1; break }
+                '5' { Show-ArgonConnectionInfo; Read-Host 'Press Enter to continue'; break }
+                '6' { return }
+                default { Write-TransportLog WARN 'Enter 1, 2, 3, 4, 5 or 6.'; Start-Sleep -Seconds 2; continue }
+            }
+        }
+        catch {
+            Write-TransportLog ERROR $_.Exception.Message
+            Start-Sleep -Seconds 2
+        }
+    }
+}
+
 function Show-Menu {
     while ($true) {
         Clear-Host
@@ -1709,8 +2189,9 @@ function Show-Menu {
         Write-Host '  5. Enable/disable YouTube routing'
         Write-Host '  6. Patch Antigravity binaries'
         Write-Host '  7. Roll back Antigravity binary patch'
+        Write-Host '  8. Gemini 4 Argon pipeline (Native bridge)'
         Write-Host ''
-        $selection = Read-Host 'Select 1-7'
+        $selection = Read-Host 'Select 1-8'
         try {
             switch ($selection) {
                 '1' { Enable-Transport; break }
@@ -1720,7 +2201,8 @@ function Show-Menu {
                 '5' { Switch-YouTubeRouting; break }
                 '6' { Invoke-AntigravityBinaryPatch -Direction Apply | Out-Null; break }
                 '7' { Invoke-AntigravityBinaryPatch -Direction Rollback | Out-Null; break }
-                default { Write-TransportLog WARN 'Enter 1, 2, 3, 4, 5, 6 or 7.'; Start-Sleep -Seconds 2; continue }
+                '8' { Show-ArgonMenu; break }
+                default { Write-TransportLog WARN 'Enter 1, 2, 3, 4, 5, 6, 7 or 8.'; Start-Sleep -Seconds 2; continue }
             }
         }
         catch {
@@ -1741,6 +2223,12 @@ try {
         'watchdog' { Invoke-TransportWatchdog }
         'antigravity-patch' { Invoke-AntigravityBinaryPatch -Direction Apply | Out-Null }
         'antigravity-rollback' { Invoke-AntigravityBinaryPatch -Direction Rollback | Out-Null }
+        'argon-menu' { Show-ArgonMenu }
+        'argon-enable' { Start-ArgonBridge }
+        'argon-disable' { Stop-ArgonBridge }
+        'argon-status' { Get-ArgonBridgeStatus }
+        'argon-cookie' { Set-ArgonCookie }
+        'argon-test' { Test-ArgonPipeline }
     }
 }
 catch {
