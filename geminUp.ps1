@@ -2035,13 +2035,14 @@ function Add-ArgonAccount {
     Write-Host '  Add Google Account to Gemini 4 Argon Pool' -ForegroundColor Cyan
     Write-Host '==================================================' -ForegroundColor Cyan
     Write-Host '1. In browser, log in to gemini.google.com with your Google account.' -ForegroundColor Yellow
-    Write-Host '2. Open DevTools (F12) -> Network tab -> F5 -> select any request.' -ForegroundColor Yellow
-    Write-Host '3. Copy Request Headers -> "Cookie" (or export via Cookie-Editor extension).' -ForegroundColor Yellow
+    Write-Host '2. Export cookies via "cookies.txt" extension (Netscape HTTP Cookie format):' -ForegroundColor Yellow
+    Write-Host '   https://github.com/hrdl-github/cookies-txt' -ForegroundColor Cyan
+    Write-Host '   (Alternatively: DevTools F12 -> Network -> F5 -> Copy Request Header "Cookie")' -ForegroundColor DarkGray
     Write-Host '   (Required items: __Secure-1PSID, SAPISID, SID, etc.)' -ForegroundColor DarkGray
     Write-Host ''
     Write-Host 'How would you like to provide the cookie?' -ForegroundColor Cyan
     Write-Host '  1. Read directly from Windows Clipboard (Recommended - avoids console buffer limits)'
-    Write-Host '  2. Read from file (cookie.txt, cookies.txt Netscape format, or storage.json)'
+    Write-Host '  2. Read from file (cookies.txt Netscape format, or storage.json)'
     Write-Host '  3. Paste manually'
     Write-Host ''
 
@@ -2415,11 +2416,13 @@ function Show-ArgonConnectionInfo {
     Write-Host '==================================================' -ForegroundColor Cyan
     Write-Host '1. HOW TO ADD GOOGLE ACCOUNTS (STEP-BY-STEP):' -ForegroundColor Yellow
     Write-Host '  a) Open browser and log in to gemini.google.com with your Google account.'
-    Write-Host '  b) Press F12 (DevTools) -> Network tab -> reload (F5) -> click any request.'
-    Write-Host '  c) Under Request Headers, right-click "Cookie" -> Copy Value'
-    Write-Host '     (or use Cookie-Editor browser extension -> Export -> JSON).'
+    Write-Host '  b) Recommended extension: "cookies.txt" (Netscape HTTP Cookie format):'
+    Write-Host '     https://github.com/hrdl-github/cookies-txt' -ForegroundColor Cyan
+    Write-Host '     (Click extension -> Download cookies for gemini.google.com)' -ForegroundColor DarkGray
+    Write-Host '  c) Alternatively: Press F12 -> Network -> F5 -> Copy Request Header "Cookie".'
     Write-Host '  d) In geminUp Argon Menu, select Option 2 ("Add Google Account").'
-    Write-Host '  e) Select Option 1 ("Read from Clipboard"). The cookie is auto-parsed and verified.'
+    Write-Host '  e) Select Option 2 ("Read from file") and provide the path to cookies.txt,'
+    Write-Host '     or copy its content and select Option 1 ("Read from Clipboard").'
     Write-Host '  f) Repeat with additional Google accounts to build a rotating standby pool!'
     Write-Host ''
     Write-Host '2. NATIVE ANTIGRAVITY IDE INTEGRATION:' -ForegroundColor Yellow
