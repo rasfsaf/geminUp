@@ -6,6 +6,7 @@ const tls = require('node:tls');
 function createSocks5Connection(proxyHost, proxyPort, targetHost, targetPort, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host: proxyHost, port: proxyPort });
+    socket.setNoDelay(true);
     let stage = 0;
     let timer = setTimeout(() => {
       socket.destroy();
@@ -64,7 +65,13 @@ function createSocks5Connection(proxyHost, proxyPort, targetHost, targetPort, ti
 
 function createAgent(proxyUrl) {
   if (!proxyUrl) {
-    return new https.Agent({ keepAlive: true, maxSockets: 50 });
+    return new https.Agent({
+      keepAlive: true,
+      keepAliveMsecs: 30000,
+      maxSockets: 100,
+      maxFreeSockets: 20,
+      timeout: 30000,
+    });
   }
 
   const parsed = new URL(proxyUrl);
@@ -74,6 +81,10 @@ function createAgent(proxyUrl) {
 
     return new https.Agent({
       keepAlive: true,
+      keepAliveMsecs: 30000,
+      maxSockets: 100,
+      maxFreeSockets: 20,
+      timeout: 30000,
       createConnection(options, callback) {
         createSocks5Connection(proxyHost, proxyPort, options.host, Number(options.port) || 443)
           .then((rawSocket) => {
@@ -81,6 +92,7 @@ function createAgent(proxyUrl) {
               socket: rawSocket,
               servername: options.servername || options.host,
             });
+            tlsSocket.setNoDelay(true);
             tlsSocket.once('error', (err) => callback(err));
             tlsSocket.once('secureConnect', () => callback(null, tlsSocket));
           })
@@ -90,8 +102,22 @@ function createAgent(proxyUrl) {
   }
 
   // Fallback for standard HTTP proxy
-  return new https.Agent({ keepAlive: true });
+  return new https.Agent({
+    keepAlive: true,
+    keepAliveMsecs: 30000,
+    maxSockets: 100,
+    maxFreeSockets: 20,
+    timeout: 30000,
+  });
 }
+
+const directHttpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 100,
+  maxFreeSockets: 20,
+  timeout: 30000,
+});
 
 function doRequest(urlString, options = {}) {
   return new Promise((resolve, reject) => {
@@ -162,5 +188,6 @@ function doRequest(urlString, options = {}) {
 module.exports = {
   createAgent,
   createSocks5Connection,
+  directHttpsAgent,
   doRequest,
 };

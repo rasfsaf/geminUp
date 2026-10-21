@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status', 'watchdog', 'antigravity-patch', 'antigravity-rollback', 'argon-menu', 'argon-enable', 'argon-disable', 'argon-status', 'argon-cookie', 'argon-test', 'argon-route')]
+    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status', 'watchdog', 'antigravity-patch', 'antigravity-rollback', 'argon-menu', 'argon-enable', 'argon-disable', 'argon-status', 'argon-accounts', 'argon-cookie', 'argon-test', 'argon-route')]
     [string]$Action = 'menu'
 )
 
@@ -2062,6 +2062,9 @@ function Start-ArgonBridge {
         Write-TransportLog INFO 'geminUp SOCKS5 is not running; Argon Gateway will connect directly.'
     }
 
+    # Cleanup legacy task if present
+    Unregister-ScheduledTask -TaskName 'geminUp Argon Bridge' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+
     try {
         $taskAction = New-ScheduledTaskAction -Execute $nodeExe -Argument $taskArguments -WorkingDirectory $script:ArgonDir
         $triggers = @(
@@ -2080,7 +2083,12 @@ function Start-ArgonBridge {
         Start-ScheduledTask -TaskName $script:ArgonTaskName
     }
     catch {
-        Write-TransportLog WARN "Could not register or start scheduled task: $($_.Exception.Message)"
+        Write-TransportLog WARN "Could not register scheduled task (SYSTEM): $($_.Exception.Message)"
+        Write-TransportLog INFO "Launching Argon Gateway as autonomous hidden background process..."
+        $proc = Start-Process -FilePath $nodeExe -ArgumentList $taskArguments -WorkingDirectory $script:ArgonDir -WindowStyle Hidden -PassThru
+        if ($null -ne $proc) {
+            [IO.File]::WriteAllText($script:ArgonPidPath, $proc.Id.ToString(), [Text.UTF8Encoding]::new($false))
+        }
     }
 
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -2329,18 +2337,39 @@ function Format-QuotaProgressBar {
 
 function Show-ArgonAccounts {
     $status = Get-ArgonBridgeStatus
-    if (-not $status.Listening) {
-        Write-TransportLog WARN 'Argon Gateway is not running. Start it first.'
+    $poolData = $null
+
+    if ($status.Listening) {
+        try {
+            $poolData = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/admin/api/status" -Method Get -TimeoutSec 5 -ErrorAction Stop
+        } catch { }
+    }
+
+    if ($null -eq $poolData -and (Test-Path -LiteralPath $script:ArgonAccountsPath)) {
+        try {
+            $fileRaw = Get-Content -LiteralPath $script:ArgonAccountsPath -Raw -Encoding utf8 | ConvertFrom-Json
+            $poolData = [PSCustomObject]@{
+                totalAccounts = $fileRaw.accounts.Count
+                activeAccountId = $fileRaw.activeAccountId
+                accounts = $fileRaw.accounts
+            }
+        } catch { }
+    }
+
+    if ($null -eq $poolData) {
+        Write-TransportLog WARN 'Argon Gateway is not running and no accounts file found. Start it or add accounts.'
         return
     }
 
     try {
-        $poolData = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/admin/api/status" -Method Get -TimeoutSec 5 -ErrorAction Stop
         Write-Host ''
         Write-Host '==================================================' -ForegroundColor Cyan
         Write-Host '           Argon Gateway Account Pool             ' -ForegroundColor Cyan
         Write-Host '  Developer Blog: https://t.me/iqsklad20          ' -ForegroundColor Magenta
         Write-Host '==================================================' -ForegroundColor Cyan
+        $gwRunText = if ($status.Listening) { "RUNNING (PID: $($status.Pid))" } else { "STANDBY (Engine offline)" }
+        $gwColor = if ($status.Listening) { 'Green' } else { 'Yellow' }
+        Write-Host "Gateway Status: $gwRunText" -ForegroundColor $gwColor
         Write-Host "Total Accounts: $($poolData.totalAccounts) | Active ID: $($poolData.activeAccountId)" -ForegroundColor White
 
         if ($poolData.PSObject.Properties.Name -contains 'keepAlive' -and $null -ne $poolData.keepAlive) {
@@ -2370,24 +2399,45 @@ function Show-ArgonAccounts {
             Write-Host "#$index $prefix $($acc.label) [ID: $($acc.id)]" -ForegroundColor $color
             $index++
             $served = if ($acc.PSObject.Properties.Name -contains 'requestsServed') { $acc.requestsServed } else { 0 }
-            Write-Host "         Status: $($acc.status) | Models: $($acc.modelsCount) | Requests Handled: $served" -ForegroundColor DarkGray
+            $mCount = if ($acc.PSObject.Properties.Name -contains 'modelsCount') { $acc.modelsCount } elseif ($acc.availableModels) { @($acc.availableModels).Count } else { 0 }
+            Write-Host "         Status: $($acc.status) | Models: $mCount | Requests Handled: $served" -ForegroundColor DarkGray
 
             if ($null -ne $acc.quota -and ($acc.quota.PSObject.Properties.Name -contains 'items')) {
-                $agentQuota = @($acc.quota.items | Where-Object { $_.action -eq 12 } | Select-Object -First 1)
-                $chatQuota = @($acc.quota.items | Where-Object { $_.action -eq 2 -and ($null -eq $_.mode -or $_.mode -eq 0) } | Select-Object -First 1)
+                $agentQuota = @($acc.quota.items | Where-Object { $_.PSObject.Properties.Name -contains 'action' -and $_.action -eq 12 } | Select-Object -First 1)
+                $chatQuota = @($acc.quota.items | Where-Object { $_.PSObject.Properties.Name -contains 'action' -and $_.action -eq 2 } | Select-Object -First 1)
 
                 if ($agentQuota.Count -gt 0) {
-                    $bar = Format-QuotaProgressBar -UsedPercent ([int]$agentQuota[0].usedPercent)
-                    $reset = if ($agentQuota[0].resetAt) { "(Resets: $($agentQuota[0].resetAt))" } else { '' }
-                    Write-Host "         Antigravity Agent Mode (action: 12): $bar $($agentQuota[0].status) $reset" -ForegroundColor Cyan
+                    $item = $agentQuota[0]
+                    $props = $item.PSObject.Properties.Name
+                    $used = if ($props -contains 'usedPercent') { [int]$item.usedPercent } else { 0 }
+                    $bar = Format-QuotaProgressBar -UsedPercent $used
+                    $reset = if ($props -contains 'resetAt' -and $item.resetAt) { "(Resets: $($item.resetAt))" } else { '' }
+                    $remText = if ($props -contains 'remaining' -and $props -contains 'limit' -and $null -ne $item.remaining -and $null -ne $item.limit) {
+                        "$($item.remaining)/$($item.limit) rem"
+                    } else {
+                        "$used% used"
+                    }
+                    $statusText = if ($props -contains 'status') { $item.status } else { 'available' }
+                    Write-Host "         Antigravity Agent Mode (action: 12): $bar $statusText ($remText) $reset" -ForegroundColor Cyan
                 } else {
-                    Write-Host "         Antigravity Agent Mode (action: 12): [----------] 0% (Full / Ready)" -ForegroundColor Cyan
+                    Write-Host "         Antigravity Agent Mode (action: 12): [----------] 0% available (100/100 rem)" -ForegroundColor Cyan
                 }
 
                 if ($chatQuota.Count -gt 0) {
-                    $cBar = Format-QuotaProgressBar -UsedPercent ([int]$chatQuota[0].usedPercent)
-                    Write-Host "         Web Chat Limit (action: 2):          $cBar $($chatQuota[0].status)" -ForegroundColor DarkYellow
+                    $cItem = $chatQuota[0]
+                    $cProps = $cItem.PSObject.Properties.Name
+                    $cUsed = if ($cProps -contains 'usedPercent') { [int]$cItem.usedPercent } else { 0 }
+                    $cBar = Format-QuotaProgressBar -UsedPercent $cUsed
+                    $cRem = if ($cProps -contains 'remaining' -and $cProps -contains 'limit' -and $null -ne $cItem.remaining -and $null -ne $cItem.limit) {
+                        "$($cItem.remaining)/$($cItem.limit) rem"
+                    } else {
+                        "$cUsed% used"
+                    }
+                    $cStatusText = if ($cProps -contains 'status') { $cItem.status } else { 'available' }
+                    Write-Host "         Web Chat Limit (action: 2):          $cBar $cStatusText ($cRem)" -ForegroundColor DarkYellow
                 }
+            } else {
+                Write-Host "         Antigravity Agent Mode (action: 12): [----------] 0% available (100/100 rem)" -ForegroundColor Cyan
             }
             if (-not [string]::IsNullOrWhiteSpace($acc.lastKeepAliveAt)) {
                 Write-Host "         Last Heartbeat Keep-Alive:          $($acc.lastKeepAliveAt)" -ForegroundColor DarkGray
@@ -2706,6 +2756,7 @@ try {
         'argon-enable' { Start-ArgonBridge }
         'argon-disable' { Stop-ArgonBridge }
         'argon-status' { Get-ArgonBridgeStatus }
+        'argon-accounts' { Show-ArgonAccounts }
         'argon-cookie' { Add-ArgonAccount }
         'argon-account' { Add-ArgonAccount }
         'argon-test' { Test-ArgonPipeline }

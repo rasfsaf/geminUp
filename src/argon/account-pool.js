@@ -53,6 +53,33 @@ class AccountPool {
         const parsed = JSON.parse(raw);
         this.accounts = Array.isArray(parsed.accounts) ? parsed.accounts : [];
         this.activeAccountId = parsed.activeAccountId || (this.accounts[0]?.id || null);
+
+        // Ensure each account has a baseline Antigravity Agent Mode quota record
+        for (const acc of this.accounts) {
+          if (!acc.quota) {
+            acc.quota = { status: 'available', updatedAt: new Date().toISOString(), items: [] };
+          }
+          if (!Array.isArray(acc.quota.items)) {
+            acc.quota.items = [];
+          }
+          let ag = acc.quota.items.find((x) => x.action === 12);
+          if (!ag) {
+            const served = acc.requestsServed || 0;
+            const remaining = Math.max(0, 100 - (served % 100));
+            ag = {
+              key: 'any:12:12',
+              label: 'Antigravity (Agent Mode)',
+              mode: null,
+              action: 12,
+              unit: 12,
+              usedPercent: Math.round(((100 - remaining) / 100) * 100),
+              remaining,
+              limit: 100,
+              status: acc.status === 'exhausted' ? 'exhausted' : 'available',
+            };
+            acc.quota.items.unshift(ag);
+          }
+        }
       }
     } catch (err) {
       console.warn(`[Argon Pool] Could not load accounts from ${this.storagePath}: ${err.message}`);
@@ -351,7 +378,14 @@ class AccountPool {
       this.absorbSetCookies(account, quotaRes.rawCookies);
       const quotaRaw = await quotaRes.text();
       const { frames } = require('./stream-parser').parseGoogleFrames(quotaRaw);
-      account.quota = parseGeminiQuotaFrames(frames);
+      const parsedQuota = parseGeminiQuotaFrames(frames);
+      const existingAg = account.quota?.items?.find((x) => x.action === 12);
+      if (parsedQuota && Array.isArray(parsedQuota.items)) {
+        if (existingAg && !parsedQuota.items.some((x) => x.action === 12)) {
+          parsedQuota.items.unshift(existingAg);
+        }
+        account.quota = parsedQuota;
+      }
     } catch (qErr) {
       console.warn(`[Argon Pool] Account ${account.id} quota check notice: ${qErr.message}`);
     }

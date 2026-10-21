@@ -13,7 +13,7 @@ process.on('unhandledRejection', (reason) => {
 });
 const { AccountPool, BASE_URL, USER_AGENT } = require('./account-pool');
 const { KeepAliveManager } = require('./keepalive-manager');
-const { createAgent, doRequest } = require('./http-client');
+const { createAgent, directHttpsAgent, doRequest } = require('./http-client');
 const {
   GENERATE_PATH,
   buildGenerateRequest,
@@ -560,7 +560,7 @@ async function forwardToGoogleCloudCode(req, res, reqBuffer) {
       path: upstreamUrl.pathname + upstreamUrl.search,
       method: req.method,
       headers,
-      agent: httpAgent,
+      agent: directHttpsAgent,
       timeout: 15000,
     };
 
@@ -613,7 +613,7 @@ async function forwardAvailableModels(req, res, reqBuffer) {
       path: upstreamUrl.pathname + upstreamUrl.search,
       method: req.method,
       headers,
-      agent: httpAgent,
+      agent: directHttpsAgent,
       timeout: 15000,
     };
 
@@ -684,10 +684,12 @@ async function forwardAvailableModels(req, res, reqBuffer) {
 async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStream = true) {
   const redirectConfig = getRedirectConfig();
   const rawModel = String(bodyJson.model || bodyJson.request?.model || bodyJson.model_id || 'claude-sonnet-4-6').toLowerCase();
-  const isTargeted = rawModel.includes('sonnet') || rawModel.includes('argon') || rawModel.includes('flash') || rawModel.includes('opus');
+  const isArgon = rawModel.includes('argon');
+  const isSonnet = rawModel.includes('sonnet');
+  const isTargeted = isArgon || (isSonnet && redirectConfig.enabled);
 
   // If redirect is disabled or this model is not targeted for pool routing, pass through to Google Cloud Code
-  if (!redirectConfig.enabled || !isTargeted) {
+  if (!isTargeted) {
     return await forwardToGoogleCloudCode(req, res, rawBuf);
   }
 
@@ -698,12 +700,10 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
     return await forwardToGoogleCloudCode(req, res, rawBuf);
   }
 
-  if (rawModel.includes('sonnet')) {
+  if (isSonnet) {
     console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Claude Sonnet 4.6 request -> Redirecting to Gemini 4 Argon with Agent Mode quota (action: 12)`);
-  } else if (rawModel.includes('argon')) {
+  } else if (isArgon) {
     console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini 4 Argon request -> Serving with Agent Mode quota (action: 12)`);
-  } else if (rawModel.includes('flash')) {
-    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini 3.8 Flash request -> Serving with Agent Mode quota (action: 12)`);
   }
 
   let account = pool.getActiveAccount();
@@ -758,6 +758,15 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
       pool.absorbSetCookies(account, upstreamRes.rawCookies);
 
       if (upstreamRes.status === 429) {
+        if (account.quota && Array.isArray(account.quota.items)) {
+          const ag = account.quota.items.find((x) => x.action === 12);
+          if (ag) {
+            ag.status = 'exhausted';
+            ag.remaining = 0;
+            ag.usedPercent = 100;
+          }
+        }
+        pool.markExhausted(account.id);
         throw { upstreamStatus: 429, upstreamCode: 1037, message: 'Gemini rate limited / quota exhausted' };
       }
 
@@ -771,13 +780,31 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
       // Record successful request and update local quota metrics
       account.requestsServed = (account.requestsServed || 0) + 1;
-      if (account.quota && Array.isArray(account.quota.items)) {
-        const ag = account.quota.items.find((x) => x.action === 12);
-        if (ag && typeof ag.remaining === 'number' && ag.remaining > 0) {
-          ag.remaining--;
-          if (ag.limit) {
-            ag.usedPercent = Math.min(100, Math.round(((ag.limit - ag.remaining) / ag.limit) * 100));
-          }
+      if (!account.quota) {
+        account.quota = { status: 'available', updatedAt: new Date().toISOString(), items: [] };
+      }
+      if (!Array.isArray(account.quota.items)) {
+        account.quota.items = [];
+      }
+      let ag = account.quota.items.find((x) => x.action === 12);
+      if (!ag) {
+        ag = {
+          key: 'any:12:12',
+          label: 'Antigravity (Agent Mode)',
+          mode: null,
+          action: 12,
+          unit: 12,
+          usedPercent: 0,
+          remaining: 100,
+          limit: 100,
+          status: 'available',
+        };
+        account.quota.items.push(ag);
+      }
+      if (typeof ag.remaining === 'number' && ag.remaining > 0) {
+        ag.remaining--;
+        if (ag.limit) {
+          ag.usedPercent = Math.min(100, Math.round(((ag.limit - ag.remaining) / ag.limit) * 100));
         }
       }
       account.lastUsedAt = new Date().toISOString();
@@ -792,6 +819,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         });
 
         let accumulatedContent = '';
+        let accumulatedThoughts = '';
         let streamRemainder = '';
 
         // Handle client connection closing prematurely
@@ -810,6 +838,30 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
           if (frames.length > 0) {
             try {
               const parsed = parseGeminiStream(frames);
+
+              // Stream thoughts immediately to eliminate initial TTFT waiting
+              if (parsed.thoughts && parsed.thoughts.length > accumulatedThoughts.length) {
+                const deltaThoughts = parsed.thoughts.slice(accumulatedThoughts.length);
+                accumulatedThoughts = parsed.thoughts;
+                const thoughtDelta = {
+                  response: {
+                    candidates: [
+                      {
+                        content: {
+                          role: 'model',
+                          parts: [{ text: deltaThoughts, thought: true }],
+                        },
+                        finishReason: null,
+                      },
+                    ],
+                  },
+                };
+                if (!res.writableEnded && !res.destroyed) {
+                  res.write(`data: ${JSON.stringify(thoughtDelta)}\n\n`);
+                }
+              }
+
+              // Stream content
               if (parsed.content && parsed.content.length > accumulatedContent.length) {
                 const deltaText = parsed.content.slice(accumulatedContent.length);
                 accumulatedContent = parsed.content;
