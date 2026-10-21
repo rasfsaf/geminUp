@@ -1040,87 +1040,59 @@ function Invoke-AntigravityBinaryPatch {
     return ($changed -gt 0)
 }
 
-function Invoke-AntigravityAsarPatch {
-    param([ValidateSet('Apply', 'Rollback')][string]$Direction = 'Apply')
-
-    $candidates = @(
-        (Join-Path $env:LOCALAPPDATA 'Programs\Antigravity\resources\app.asar'),
-        (Join-Path $env:ProgramFiles 'Antigravity\resources\app.asar'),
-        'C:\Users\0SLEK\AppData\Local\Programs\Antigravity\resources\app.asar'
-    )
-    $targetPath = $null
-    foreach ($cand in $candidates) {
-        if (Test-Path -LiteralPath $cand) {
-            $targetPath = $cand
-            break
-        }
+function Get-SonnetRedirectState {
+    $cfgFile = Join-Path $script:ArgonDir 'redirect-config.json'
+    if (Test-Path -LiteralPath $cfgFile) {
+        try {
+            $data = Get-Content -LiteralPath $cfgFile -Raw -Encoding utf8 | ConvertFrom-Json
+            return [bool]$data.redirectSonnetToArgon
+        } catch { }
     }
-    if (-not $targetPath) {
-        Write-TransportLog WARN 'Antigravity app.asar not found.'
-        return $false
+    return $false
+}
+
+function Set-SonnetRedirectState {
+    param([bool]$Enabled)
+    $cfgFile = Join-Path $script:ArgonDir 'redirect-config.json'
+    $obj = @{
+        redirectSonnetToArgon = $Enabled
+        targetModel = 'claude-sonnet-4-6'
+        failClosed = $true
+        updatedAt = (Get-Date).ToString('o')
     }
-
-    $s1 = "            '--cloud_code_endpoint',`n            'https://daily-cloudcode-pa.googleapis.com',`n            '--enable_sidecars',`n        ];`n        // Point the LS at the main process' host bridge server."
-    $s2Prefix = "            '--cloud_code_endpoint',`n            process.env.ARGON_ENDPOINT||'https://daily-cloudcode-pa.googleapis.com',`n            '--enable_sidecars',`n        ];`n        // geminUp: "
-    $s2Padded = $s2Prefix.PadRight($s1.Length, ' ')
-
-    $from = if ($Direction -eq 'Apply') { $s1 } else { $s2Padded }
-    $to = if ($Direction -eq 'Apply') { $s2Padded } else { $s1 }
-
-    $bytes = [System.IO.File]::ReadAllBytes($targetPath)
-    $fromBytes = [System.Text.Encoding]::UTF8.GetBytes($from)
-    $toBytes = [System.Text.Encoding]::UTF8.GetBytes($to)
-
-    $hits = @(Find-AntigravityMarkerOffsets -Haystack $bytes -Needle $fromBytes)
-    if ($hits.Count -eq 0) {
-        $already = @(Find-AntigravityMarkerOffsets -Haystack $bytes -Needle $toBytes)
-        if ($already.Count -gt 0) {
-            Write-Host "  [OK] app.asar is already in the requested ($Direction) state" -ForegroundColor Green
-            return $true
-        }
-        Write-Warning "  ${targetPath}: Cloud Code endpoint marker not found, file skipped."
-        return $false
-    }
-
-    Stop-AntigravityProcesses
-    $backup = "${targetPath}.bak"
-    if (-not (Test-Path -LiteralPath $backup)) {
-        Write-Host '  writing app.asar backup...' -ForegroundColor DarkCyan
-        Copy-Item -LiteralPath $targetPath -Destination $backup -ErrorAction Stop
-    }
-
-    foreach ($hit in $hits) {
-        [Buffer]::BlockCopy($toBytes, 0, $bytes, $hit, $toBytes.Length)
-    }
-
-    [System.IO.File]::WriteAllBytes($targetPath, $bytes)
-    Write-Host "  [OK] app.asar: patched Cloud Code router hook (replacements=$($hits.Count))" -ForegroundColor Green
-    return $true
+    $json = ConvertTo-Json -InputObject $obj -Compress
+    [System.IO.File]::WriteAllText($cfgFile, $json, [System.Text.Encoding]::UTF8)
+    return $Enabled
 }
 
 function Switch-AntigravityArgonRouting {
-    $current = [Environment]::GetEnvironmentVariable('ARGON_ENDPOINT', 'User')
-    $targetUrl = "http://127.0.0.1:$script:ArgonListenPort"
+    $current = Get-SonnetRedirectState
+    $newState = -not $current
+    Set-SonnetRedirectState -Enabled $newState | Out-Null
 
-    if ([string]::IsNullOrWhiteSpace($current)) {
-        Write-Host 'Activating native Antigravity routing to local Argon Gateway...' -ForegroundColor Cyan
-        Invoke-AntigravityAsarPatch -Direction Apply | Out-Null
-        [Environment]::SetEnvironmentVariable('ARGON_ENDPOINT', $targetUrl, 'User')
-        [Environment]::SetEnvironmentVariable('ARGON_ENDPOINT', $targetUrl, 'Process')
-        Write-Host ''
-        Write-TransportLog OK "Antigravity routing ENABLED -> $targetUrl"
-        Write-Host '  Native Gemini 4 Argon & Agent Mode quota is now linked to Antigravity IDE.' -ForegroundColor Green
-        Write-Host '  Please restart Antigravity IDE to activate the connection!' -ForegroundColor Yellow
-        Write-Host ''
-    } else {
-        Write-Host 'Deactivating native Antigravity routing...' -ForegroundColor Cyan
-        [Environment]::SetEnvironmentVariable('ARGON_ENDPOINT', $null, 'User')
-        [Environment]::SetEnvironmentVariable('ARGON_ENDPOINT', $null, 'Process')
-        Write-Host ''
-        Write-TransportLog OK "Antigravity routing DISABLED. Restored default Google Cloud Code."
-        Write-Host '  Please restart Antigravity IDE to revert to default.' -ForegroundColor Yellow
-        Write-Host ''
+    # Ensure app.asar is clean (no Cloud Code breakage)
+    $asarPath = Join-Path $env:LOCALAPPDATA 'Programs\Antigravity\resources\app.asar'
+    $asarBak = Join-Path $env:LOCALAPPDATA 'Programs\Antigravity\resources\app.asar.bak'
+    if ((Test-Path -LiteralPath $asarBak) -and (Test-Path -LiteralPath $asarPath)) {
+        $content = [System.IO.File]::ReadAllText($asarPath, [System.Text.Encoding]::UTF8)
+        if ($content.Contains('ARGON_ENDPOINT')) {
+            Copy-Item -LiteralPath $asarBak -Destination $asarPath -Force
+        }
     }
+    [Environment]::SetEnvironmentVariable('ARGON_ENDPOINT', $null, 'User')
+    [Environment]::SetEnvironmentVariable('ARGON_ENDPOINT', $null, 'Process')
+
+    Write-Host ''
+    if ($newState) {
+        Write-TransportLog OK 'Claude Sonnet 4.6 -> Argon Redirection: ENABLED (Fail-Closed mode).'
+        Write-Host '  When Claude Sonnet 4.6 is selected in Antigravity, chat inference' -ForegroundColor Green
+        Write-Host '  is routed to local Gemini 4 Argon with Agent Mode quota.' -ForegroundColor Green
+        Write-Host '  If Argon pool is exhausted, requests are blocked immediately without hitting Google Cloud.' -ForegroundColor Yellow
+    } else {
+        Write-TransportLog OK 'Claude Sonnet 4.6 -> Argon Redirection: DISABLED.'
+        Write-Host '  Claude Sonnet requests will go directly to Google Cloud backend.' -ForegroundColor White
+    }
+    Write-Host ''
 }
 
 function Set-AntigravityShortcutRouting {
@@ -2434,9 +2406,9 @@ function Show-ArgonMenu {
         $acctLabel = if ($status.AccountsCount -gt 0) { "$($status.AccountsCount) account(s) (Active: $($status.ActiveAccountLabel))" } else { 'NO ACCOUNTS' }
         $acctColor = if ($status.AccountsCount -gt 0) { 'Green' } else { 'Yellow' }
         $transportRoute = if (Test-TransportListener -TimeoutMilliseconds 250) { "SOCKS5 (127.0.0.1:$script:ListenPort)" } else { 'Direct' }
-        $routingEnv = [Environment]::GetEnvironmentVariable('ARGON_ENDPOINT', 'User')
-        $antigravityRouting = if (-not [string]::IsNullOrWhiteSpace($routingEnv)) { "ENABLED ($routingEnv)" } else { 'DISABLED (Direct Cloud Code)' }
-        $routingColor = if (-not [string]::IsNullOrWhiteSpace($routingEnv)) { 'Green' } else { 'DarkGray' }
+        $sonnetRedirect = Get-SonnetRedirectState
+        $antigravityRouting = if ($sonnetRedirect) { 'ENABLED (Claude Sonnet 4.6 -> Argon Gateway [Fail-Closed])' } else { 'DISABLED (Direct Google Cloud)' }
+        $routingColor = if ($sonnetRedirect) { 'Green' } else { 'DarkGray' }
 
         Write-Host '==================================================' -ForegroundColor Cyan
         Write-Host '  Gemini 4 Argon Pipeline (Native Gateway Engine)' -ForegroundColor Cyan
@@ -2446,7 +2418,7 @@ function Show-ArgonMenu {
         Write-Host $statusLabel -ForegroundColor $statusColor
         Write-Host -NoNewline '  Account Pool:         '
         Write-Host $acctLabel -ForegroundColor $acctColor
-        Write-Host -NoNewline '  Antigravity Routing:  '
+        Write-Host -NoNewline '  Sonnet 4.6 Override:  '
         Write-Host $antigravityRouting -ForegroundColor $routingColor
         Write-Host "  Upstream:             $transportRoute" -ForegroundColor White
         Write-Host "  Local URL:            http://127.0.0.1:$($script:ArgonListenPort)/v1" -ForegroundColor DarkGray
@@ -2457,7 +2429,7 @@ function Show-ArgonMenu {
         Write-Host '  4. Remove Account from Pool'
         Write-Host '  5. Force Session Keep-Alive & Quota Refresh'
         Write-Host '  6. Test Argon Model Status & Latency'
-        Write-Host '  7. Toggle Antigravity Route (Link/Unlink Antigravity IDE)'
+        Write-Host '  7. Toggle Claude Sonnet 4.6 -> Argon Redirection'
         Write-Host '  8. Stop Argon Gateway'
         Write-Host '  9. Connection Instructions for IDE'
         Write-Host '  0. Return to main menu'

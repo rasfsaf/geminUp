@@ -48,9 +48,9 @@ const KNOWN_UPSTREAM_MODELS = {
   'gemini-3.1-pro': 'e6fa609c3fa255c0',
   'gemini-3.1-pro-advanced': 'e6fa609c3fa255c0',
   'gemini-3.5-flash-lite': '8c46e95b1a07cecc',
-  'claude-3-7-sonnet': 'e6fa609c3fa255c0',
+  'claude-sonnet-4-6': 'e6fa609c3fa255c0',
+  'claude-sonnet-4-5': 'e6fa609c3fa255c0',
   'claude-sonnet-4': 'e6fa609c3fa255c0',
-  'claude-3-5-sonnet': 'e6fa609c3fa255c0',
   'claude-opus-5-5': 'e6fa609c3fa255c0',
 };
 
@@ -62,7 +62,8 @@ const SUPPORTED_MODELS = [
   { id: 'gemini-3.1-pro', object: 'model', owned_by: 'google', permission: [] },
   { id: 'gemini-3.1-pro-advanced', object: 'model', owned_by: 'google', permission: [] },
   { id: 'gemini-3.5-flash-lite', object: 'model', owned_by: 'google', permission: [] },
-  { id: 'claude-3-7-sonnet', object: 'model', owned_by: 'anthropic', permission: [] },
+  { id: 'claude-sonnet-4-6', object: 'model', owned_by: 'anthropic', permission: [] },
+  { id: 'claude-sonnet-4-5', object: 'model', owned_by: 'anthropic', permission: [] },
   { id: 'claude-sonnet-4', object: 'model', owned_by: 'anthropic', permission: [] },
   { id: 'claude-opus-5-5', object: 'model', owned_by: 'anthropic', permission: [] },
 ];
@@ -103,8 +104,14 @@ const CLOUD_CODE_CATALOG = {
       tagTitle: '',
       disabled: false,
     },
-    'claude-3-7-sonnet': {
-      displayName: 'Claude 3.7 Sonnet (Argon Routed)',
+    'claude-sonnet-4-6': {
+      displayName: 'Claude Sonnet 4.6 (Argon Routed)',
+      description: 'Routed through local Argon Gateway with Agent Mode quota',
+      tagTitle: '',
+      disabled: false,
+    },
+    'claude-sonnet-4': {
+      displayName: 'Claude Sonnet 4 (Argon Routed)',
       description: 'Routed through local Argon Gateway with Agent Mode quota',
       tagTitle: '',
       disabled: false,
@@ -122,7 +129,8 @@ const CLOUD_CODE_CATALOG = {
             'gemini-4-argon-thinking-medium',
             'gemini-3.8-flash',
             'gemini-3.1-pro',
-            'claude-3-7-sonnet',
+            'claude-sonnet-4-6',
+            'claude-sonnet-4',
           ],
         },
       ],
@@ -668,7 +676,8 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
         'gemini-4-argon-thinking-medium',
         'gemini-3.8-flash',
         'gemini-3.1-pro',
-        'claude-3-7-sonnet',
+        'claude-sonnet-4-6',
+        'claude-sonnet-4',
       ],
     });
   }
