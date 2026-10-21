@@ -89,6 +89,27 @@ Android-приложение не является VPN и не перехват�
 - **Двойной API-интерфейс:** шлюз поддерживает как нативный протокол Antigravity Cloud Code (`/v1internal:*`), так и стандартный OpenAI-совместимый API (`http://127.0.0.1:8083/v1`) для сторонних расширений (Roo Code, Cline, Cursor, Continue и др.).
 - **Канал разработчика в Telegram:** новости, обновления и инсайты проекта публикуются в канале [https://t.me/iqsklad20](https://t.me/iqsklad20).
 
+### Добавление аккаунтов Google в пул Argon (пошагово)
+
+1. Открой браузер и авторизуйся на [gemini.google.com](https://gemini.google.com) под своим Google-аккаунтом.
+2. Нажми `F12` (DevTools) -> перейди на вкладку `Network` (Сеть) -> нажми `F5` (обновить) -> выбери любой запрос к `gemini.google.com`.
+3. В блоке `Request Headers` найди заголовок `Cookie`, кликни правой кнопкой мыши и нажми **Copy Value** (либо воспользуйся браузерным расширением *Cookie-Editor* -> **Export -> JSON**).
+4. Запусти `geminUp.bat` -> выбери пункт `8` (Argon menu) -> пункт `2` (Add Google Account) -> пункт `1` (Read directly from Windows Clipboard).
+5. Шлюз автоматически распознает токены (`__Secure-1PSID`, `SAPISID`, `SID` и др.), подтвердит сессию на серверах Google, запросит квоты и сохранит аккаунт в зашифрованный пул `%ProgramData%\geminUp\argon\accounts.json`.
+6. Чтобы создать отказоустойчивый пул — повтори операцию для второго/третьего аккаунта. При исчерпании лимитов шлюз переключится на резервные аккаунты автоматически.
+
+### Подключение Antigravity и сторонних IDE
+
+1. **Antigravity IDE (нативное подключение):**
+   - Запусти шлюз (пункт `1` в меню Argon);
+   - Включи маршрутизацию (пункт `7` в меню Argon: `Toggle Antigravity Route`);
+   - Перезапусти Antigravity IDE;
+   - Модель `Gemini 4 Argon` разблокирована и активна прямо в нативном выпадающем меню!
+2. **OpenAI-совместимые клиенты (Roo Code / Cline / Cursor / OpenCode):**
+   - Base URL: `http://127.0.0.1:8083/v1`
+   - API Key: `geminup` (любая строка)
+   - Model ID: `gemini-4-argon` (или `gemini-4-argon-thinking-medium`, `gemini-3.8-flash`, `gemini-3.1-pro`)
+
 Поддерживаются форматы:
 
 ```text

@@ -1078,12 +1078,12 @@ function Invoke-AntigravityAsarPatch {
             Write-Host "  [OK] app.asar is already in the requested ($Direction) state" -ForegroundColor Green
             return $true
         }
-        Write-Warning "  $targetPath: Cloud Code endpoint marker not found, file skipped."
+        Write-Warning "  ${targetPath}: Cloud Code endpoint marker not found, file skipped."
         return $false
     }
 
     Stop-AntigravityProcesses
-    $backup = "$targetPath.bak"
+    $backup = "${targetPath}.bak"
     if (-not (Test-Path -LiteralPath $backup)) {
         Write-Host '  writing app.asar backup...' -ForegroundColor DarkCyan
         Copy-Item -LiteralPath $targetPath -Destination $backup -ErrorAction Stop
@@ -2215,7 +2215,7 @@ function Format-QuotaProgressBar {
     $clamped = [Math]::Max(0, [Math]::Min(100, $UsedPercent))
     $filled = [Math]::Round($clamped / 10)
     $empty = 10 - $filled
-    $bar = ('█' * $filled) + ('░' * $empty)
+    $bar = ('#' * $filled) + ('-' * $empty)
     return "[$bar] $clamped%"
 }
 
@@ -2258,7 +2258,7 @@ function Show-ArgonAccounts {
                     $reset = if ($agentQuota[0].resetAt) { "(Resets: $($agentQuota[0].resetAt))" } else { '' }
                     Write-Host "         Antigravity Agent Mode (action: 12): $bar $($agentQuota[0].status) $reset" -ForegroundColor Cyan
                 } else {
-                    Write-Host "         Antigravity Agent Mode (action: 12): [░░░░░░░░░░] 0% (Full / Ready)" -ForegroundColor Cyan
+                    Write-Host "         Antigravity Agent Mode (action: 12): [----------] 0% (Full / Ready)" -ForegroundColor Cyan
                 }
 
                 if ($chatQuota.Count -gt 0) {
@@ -2392,25 +2392,34 @@ function Test-ArgonPipeline {
 function Show-ArgonConnectionInfo {
     Write-Host ''
     Write-Host '==================================================' -ForegroundColor Cyan
-    Write-Host '  How to Use Gemini 4 Argon in Antigravity / IDE' -ForegroundColor Cyan
+    Write-Host '  Gemini 4 Argon Pipeline: Complete Setup Guide   ' -ForegroundColor Cyan
     Write-Host '  Developer Blog: https://t.me/iqsklad20          ' -ForegroundColor Magenta
     Write-Host '==================================================' -ForegroundColor Cyan
-    Write-Host 'Native Antigravity Integration (Automatic Routing):' -ForegroundColor Yellow
-    Write-Host '  1. Start Argon Gateway (Option 1 in this menu)'
-    Write-Host '  2. Select Option 7 ("Toggle Antigravity Route") to link Antigravity IDE'
-    Write-Host '  3. Restart Antigravity IDE'
-    Write-Host '  4. Gemini 4 Argon is now unlocked natively in the model picker!'
-    Write-Host '     (tagTitle: Unavailable badge is removed; full Agent Mode quota active)'
+    Write-Host '1. HOW TO ADD GOOGLE ACCOUNTS (STEP-BY-STEP):' -ForegroundColor Yellow
+    Write-Host '  a) Open browser and log in to gemini.google.com with your Google account.'
+    Write-Host '  b) Press F12 (DevTools) -> Network tab -> reload (F5) -> click any request.'
+    Write-Host '  c) Under Request Headers, right-click "Cookie" -> Copy Value'
+    Write-Host '     (or use Cookie-Editor browser extension -> Export -> JSON).'
+    Write-Host '  d) In geminUp Argon Menu, select Option 2 ("Add Google Account").'
+    Write-Host '  e) Select Option 1 ("Read from Clipboard"). The cookie is auto-parsed and verified.'
+    Write-Host '  f) Repeat with additional Google accounts to build a rotating standby pool!'
     Write-Host ''
-    Write-Host 'OpenAI-Compatible API (for Roo Code / Cline / Cursor / OpenCode):' -ForegroundColor Yellow
+    Write-Host '2. NATIVE ANTIGRAVITY IDE INTEGRATION:' -ForegroundColor Yellow
+    Write-Host '  a) Start Argon Gateway (Option 1 in Argon Menu).'
+    Write-Host '  b) Select Option 7 ("Toggle Antigravity Route") to activate the local router.'
+    Write-Host '  c) Restart Antigravity IDE.'
+    Write-Host '  d) Gemini 4 Argon appears active and unlocked directly in the model dropdown!'
+    Write-Host '     (tagTitle: Unavailable badge is removed; high Agent Mode quota is engaged).'
+    Write-Host ''
+    Write-Host '3. OPENAI-COMPATIBLE API (Roo Code / Cline / Cursor / OpenCode):' -ForegroundColor Yellow
     Write-Host "  Endpoint: http://127.0.0.1:$($script:ArgonListenPort)/v1" -ForegroundColor Green
     Write-Host '  API Key:  geminup (or any value)' -ForegroundColor Green
     Write-Host '  Model ID: gemini-4-argon' -ForegroundColor Green
     Write-Host ''
-    Write-Host 'Multi-Chat & Subagent Architecture:' -ForegroundColor Yellow
-    Write-Host '  - Stateless RPC turns (temporary: true, unique request IDs)'
-    Write-Host '  - Multiple concurrent chat tabs and parallel subagents run with ZERO collision'
-    Write-Host '  - Sticky account pool fails over seamlessly on quota exhaustion without losing context'
+    Write-Host '4. MULTI-CHAT & SUBAGENT CONCURRENCY:' -ForegroundColor Yellow
+    Write-Host '  - Conversations are stateless on Google Web RPC (temporary: true, unique request IDs).'
+    Write-Host '  - Multiple concurrent chat tabs and parallel subagents never cross-contaminate.'
+    Write-Host '  - Sticky account pool fails over seamlessly on quota exhaustion without losing context.'
     Write-Host ''
 }
 

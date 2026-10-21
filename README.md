@@ -89,6 +89,27 @@ Android-приложение не является VPN и не перехват�
 - **Двойной API-интерфейс:** шлюз поддерживает как нативный протокол Antigravity Cloud Code (`/v1internal:*`), так и стандартный OpenAI-совместимый API (`http://127.0.0.1:8083/v1`) для сторонних расширений (Roo Code, Cline, Cursor, Continue и др.).
 - **Канал разработчика в Telegram:** новости, обновления и инсайты проекта публикуются в канале [https://t.me/iqsklad20](https://t.me/iqsklad20).
 
+### Добавление аккаунтов Google в пул Argon (пошагово)
+
+1. Открой браузер и авторизуйся на [gemini.google.com](https://gemini.google.com) под своим Google-аккаунтом.
+2. Нажми `F12` (DevTools) -> перейди на вкладку `Network` (Сеть) -> нажми `F5` (обновить) -> выбери любой запрос к `gemini.google.com`.
+3. В блоке `Request Headers` найди заголовок `Cookie`, кликни правой кнопкой мыши и нажми **Copy Value** (либо воспользуйся браузерным расширением *Cookie-Editor* -> **Export -> JSON**).
+4. Запусти `geminUp.bat` -> выбери пункт `8` (Argon menu) -> пункт `2` (Add Google Account) -> пункт `1` (Read directly from Windows Clipboard).
+5. Шлюз автоматически распознает токены (`__Secure-1PSID`, `SAPISID`, `SID` и др.), подтвердит сессию на серверах Google, запросит квоты и сохранит аккаунт в зашифрованный пул `%ProgramData%\geminUp\argon\accounts.json`.
+6. Чтобы создать отказоустойчивый пул — повтори операцию для второго/третьего аккаунта. При исчерпании лимитов шлюз переключится на резервные аккаунты автоматически.
+
+### Подключение Antigravity и сторонних IDE
+
+1. **Antigravity IDE (нативное подключение):**
+   - Запусти шлюз (пункт `1` в меню Argon);
+   - Включи маршрутизацию (пункт `7` в меню Argon: `Toggle Antigravity Route`);
+   - Перезапусти Antigravity IDE;
+   - Модель `Gemini 4 Argon` разблокирована и активна прямо в нативном выпадающем меню!
+2. **OpenAI-совместимые клиенты (Roo Code / Cline / Cursor / OpenCode):**
+   - Base URL: `http://127.0.0.1:8083/v1`
+   - API Key: `geminup` (любая строка)
+   - Model ID: `gemini-4-argon` (или `gemini-4-argon-thinking-medium`, `gemini-3.8-flash`, `gemini-3.1-pro`)
+
 Поддерживаются форматы:
 
 ```text
@@ -322,6 +343,27 @@ Option 8 opens the autonomous local Gemini 4 Argon gateway menu (100% local, con
 - **Rich CLI Quota Monitors:** live console indicators track remaining Antigravity Agent Mode (`action: 12`) and Web Chat (`action: 2`) quotas alongside reset countdowns.
 - **Dual API Surface:** supports native Antigravity Cloud Code protocol (`/v1internal:*`) and standard OpenAI-compatible API (`http://127.0.0.1:8083/v1`) for external tools (Roo Code, Cline, Cursor, Continue, etc.).
 - **Developer Telegram Channel:** announcements, updates, and deep dives are shared at [https://t.me/iqsklad20](https://t.me/iqsklad20).
+
+### Adding Google Accounts to Argon Pool (Step-by-step)
+
+1. Open your browser and sign in to [gemini.google.com](https://gemini.google.com) with your Google account.
+2. Press `F12` (DevTools) -> navigate to the `Network` tab -> refresh (`F5`) -> select any network request to `gemini.google.com`.
+3. Under `Request Headers`, find the `Cookie` header, right-click, and select **Copy Value** (or use the *Cookie-Editor* browser extension -> **Export -> JSON**).
+4. Run `geminUp.bat` -> select Option `8` (Argon menu) -> Option `2` (Add Google Account) -> Option `1` (Read directly from Windows Clipboard).
+5. The gateway will automatically extract the authentication tokens (`__Secure-1PSID`, `SAPISID`, `SID`, etc.), verify the session against Google servers, inspect account quotas, and securely store the account in `%ProgramData%\geminUp\argon\accounts.json`.
+6. To configure a failover cluster, repeat the process with a secondary or backup Google account. If your primary account hits a 429 quota limit, the gateway will fail over to standby accounts automatically.
+
+### IDE Integration Setup
+
+1. **Antigravity IDE (Native Connection):**
+   - Start Argon Gateway (Option `1` in Argon menu);
+   - Activate routing (Option `7` in Argon menu: `Toggle Antigravity Route`);
+   - Restart Antigravity IDE;
+   - `Gemini 4 Argon` is now active and selectable directly in Antigravity's model selector!
+2. **OpenAI-Compatible Tools (Roo Code / Cline / Cursor / OpenCode):**
+   - Base URL: `http://127.0.0.1:8083/v1`
+   - API Key: `geminup` (any string)
+   - Model ID: `gemini-4-argon` (or `gemini-4-argon-thinking-medium`, `gemini-3.8-flash`, `gemini-3.1-pro`)
 
 Supported formats:
 
