@@ -55,11 +55,21 @@ function normalizeQuotaItem(raw) {
   const mode = Number.isInteger(raw[0][0]) ? raw[0][0] : null;
   const action = Number.isInteger(raw[0][1]) ? raw[0][1] : null;
   const unit = Number.isInteger(raw[1]) ? raw[1] : null;
-  const usedPercent = Number(raw[2]);
+  const usedAbsolute = Number(raw[2]);
   const resetAt = timestampToIso(raw[3]) || new Date(Date.now() + 5 * 3600 * 1000).toISOString();
   const limit = Number.isFinite(Number(raw[4])) ? Number(raw[4]) : null;
   const remaining = Number.isFinite(Number(raw[5])) ? Number(raw[5]) : null;
-  if (action === null || !Number.isFinite(usedPercent)) return null;
+  if (action === null || !Number.isFinite(usedAbsolute)) return null;
+
+  let usedPercent = 0;
+  if (limit > 0) {
+    usedPercent = (usedAbsolute / limit) * 100;
+  } else if (remaining !== null && (usedAbsolute + remaining) > 0) {
+    usedPercent = (usedAbsolute / (usedAbsolute + remaining)) * 100;
+  } else {
+    usedPercent = usedAbsolute;
+  }
+
   const status = usedPercent >= 100 || remaining === 0
     ? 'exhausted' : usedPercent >= 90 ? 'warning' : 'available';
   return {

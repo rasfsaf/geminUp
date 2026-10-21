@@ -65,19 +65,23 @@ class AccountPool {
           let ag = acc.quota.items.find((x) => x.action === 12);
           if (!ag) {
             const served = acc.requestsServed || 0;
-            const remaining = Math.max(0, 100 - (served % 100));
+            const remaining = Math.max(0, 2400 - (served % 2400));
             ag = {
               key: 'any:12:12',
               label: 'Antigravity (Agent Mode)',
               mode: null,
               action: 12,
               unit: 12,
-              usedPercent: Math.round(((100 - remaining) / 100) * 100),
+              usedPercent: Math.round(((2400 - remaining) / 2400) * 100),
               remaining,
-              limit: 100,
+              limit: 2400,
               status: acc.status === 'exhausted' ? 'exhausted' : 'available',
             };
             acc.quota.items.unshift(ag);
+          } else if (ag.limit === 100) {
+            ag.limit = 2400;
+            ag.remaining = Math.max(0, 2400 - (acc.requestsServed || 0));
+            ag.status = 'available';
           }
         }
       }

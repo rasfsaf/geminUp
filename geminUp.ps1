@@ -2516,7 +2516,7 @@ function Show-ArgonAccounts {
                     $statusText = if ($props -contains 'status') { $item.status } else { 'available' }
                     Write-Host "         Antigravity Agent Mode (action: 12): $bar $statusText ($remText) $reset" -ForegroundColor Cyan
                 } else {
-                    Write-Host "         Antigravity Agent Mode (action: 12): [----------] 0% available (100/100 rem)" -ForegroundColor Cyan
+                    Write-Host "         Antigravity Agent Mode (action: 12): [----------] 0% available (2400/2400 rem)" -ForegroundColor Cyan
                 }
 
                 if ($chatQuota.Count -gt 0) {
@@ -2533,7 +2533,7 @@ function Show-ArgonAccounts {
                     Write-Host "         Web Chat Limit (action: 2):          $cBar $cStatusText ($cRem)" -ForegroundColor DarkYellow
                 }
             } else {
-                Write-Host "         Antigravity Agent Mode (action: 12): [----------] 0% available (100/100 rem)" -ForegroundColor Cyan
+                Write-Host "         Antigravity Agent Mode (action: 12): [----------] 0% available (2400/2400 rem)" -ForegroundColor Cyan
             }
             if (-not [string]::IsNullOrWhiteSpace($acc.lastKeepAliveAt)) {
                 Write-Host "         Last Heartbeat Keep-Alive:          $($acc.lastKeepAliveAt)" -ForegroundColor DarkGray

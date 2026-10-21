@@ -241,10 +241,10 @@ MANDATORY TOOL CALL INSTRUCTIONS:
 }
 
 function formatFunctionCall(fc) {
-  if (!fc) return '[Tool Call]';
+  if (!fc) return '';
   const name = fc.name || 'tool';
-  const args = fc.args ? JSON.stringify(fc.args) : '{}';
-  return `[Tool Call: ${name}(${args})]`;
+  const args = fc.args || {};
+  return `\`\`\`tool_call\n${JSON.stringify({ name, args }, null, 2)}\n\`\`\``;
 }
 
 function formatFunctionResponse(fr) {
@@ -421,7 +421,27 @@ function extractToolCallsFromOutput(text) {
     return { toolCalls, cleanText };
   }
 
-  // 3. Raw JSON object containing "name" and "args" (if the model didn't use fences)
+  // 3. Format: [Tool Call: run_command({"CommandLine": "..."})]
+  const bracketToolCallRegex = /\[(?:Tool Call|TOOL CALL|ToolCall):\s*([a-zA-Z0-9_\-]+)\s*\(([\s\S]*?)\)\]/gi;
+  while ((match = bracketToolCallRegex.exec(text)) !== null) {
+    const name = match[1];
+    let args = {};
+    try {
+      args = JSON.parse(match[2].trim());
+    } catch {
+      try {
+        const cleaned = match[2].trim().replace(/,\s*([\]}])/g, '$1');
+        args = JSON.parse(cleaned);
+      } catch {}
+    }
+    toolCalls.push({ name, args });
+  }
+  if (toolCalls.length > 0) {
+    cleanText = text.replace(bracketToolCallRegex, '').trim();
+    return { toolCalls, cleanText };
+  }
+
+  // 4. Raw JSON object containing "name" and "args" (if the model didn't use fences)
   const bareRegex = /\{\s*"(?:name|tool)"\s*:\s*"([a-zA-Z0-9_\-]+)"\s*,\s*"(?:args|parameters|arguments)"\s*:\s*(\{[\s\S]*?\})\s*\}/g;
   while ((match = bareRegex.exec(text)) !== null) {
     try {
@@ -450,6 +470,8 @@ function formatCloudCodeContentsToPrompt(contents, systemInstruction) {
       const role = String(turn.role || 'user').toUpperCase();
       const textParts = [];
       for (const p of turn.parts || []) {
+        if (!p) continue;
+        if (p.thought) continue;
         if (typeof p === 'string') textParts.push(p);
         else if (p && p.text) textParts.push(p.text);
         else if (p && p.inlineData) textParts.push(formatInlineData(p.inlineData));
@@ -512,6 +534,7 @@ function extractPromptFromAnyPayload(bodyJson) {
       } else if (Array.isArray(turn.parts)) {
         for (const p of turn.parts) {
           if (!p) continue;
+          if (p.thought) continue;
           if (typeof p === 'string') textParts.push(p);
           else if (p.text) textParts.push(p.text);
           else if (p.content) textParts.push(typeof p.content === 'string' ? p.content : JSON.stringify(p.content));
@@ -710,7 +733,7 @@ async function handleChatCompletions(req, res, bodyJson) {
               if (parsed.content && parsed.content.length > accumulatedContent.length) {
                 accumulatedContent = parsed.content;
 
-                const toolTagIdx = accumulatedContent.search(/```(?:tool_call|toolcall|tool)/i);
+                const toolTagIdx = accumulatedContent.search(/```(?:tool_call|toolcall|tool)|\[(?:Tool Call|TOOL CALL|ToolCall):/i);
                 let streamable = accumulatedContent;
                 if (toolTagIdx !== -1) {
                   streamable = accumulatedContent.slice(0, toolTagIdx);
@@ -1174,8 +1197,8 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
           action: 12,
           unit: 12,
           usedPercent: 0,
-          remaining: 100,
-          limit: 100,
+          remaining: 2400,
+          limit: 2400,
           status: 'available',
         };
         account.quota.items.push(ag);
@@ -1245,7 +1268,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
               if (parsed.content && parsed.content.length > accumulatedContent.length) {
                 accumulatedContent = parsed.content;
 
-                const toolTagIdx = accumulatedContent.search(/```(?:tool_call|toolcall|tool)/i);
+                const toolTagIdx = accumulatedContent.search(/```(?:tool_call|toolcall|tool)|\[(?:Tool Call|TOOL CALL|ToolCall):/i);
                 let streamableText = accumulatedContent;
                 if (toolTagIdx !== -1) {
                   streamableText = accumulatedContent.slice(0, toolTagIdx);
@@ -1348,10 +1371,6 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
             response: {
               candidates: [
                 {
-                  content: {
-                    role: 'model',
-                    parts: [{ text: '' }],
-                  },
                   finishReason: 'STOP',
                 },
               ],
