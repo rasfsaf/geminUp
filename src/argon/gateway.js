@@ -1,6 +1,8 @@
 const http = require('node:http');
 const https = require('node:https');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const { AccountPool, BASE_URL, USER_AGENT } = require('./account-pool');
 const { createAgent, doRequest } = require('./http-client');
 const {
@@ -143,6 +145,8 @@ function resolveModelUpstream(requestedModel, account) {
   let norm = String(requestedModel || '').toLowerCase().replace(/^google\//, '').replace(/^gemini\//, '').replace(/^anthropic\//, '');
   if (norm.includes('argon') || norm.includes('sonnet') || norm.includes('opus')) {
     norm = 'gemini-4-argon';
+  } else if (norm.includes('flash')) {
+    norm = 'gemini-3.8-flash';
   }
   if (account && Array.isArray(account.availableModels)) {
     const discovered = account.availableModels.find((m) => (
@@ -409,8 +413,154 @@ async function handleChatCompletions(req, res, bodyJson) {
   return sendError(res, 502, 'Failed to complete chat request after exhausting failover pool.', 'upstream_error');
 }
 
-async function handleCloudCodeGenerateContent(req, res, bodyJson, isStream = true) {
-  const modelName = bodyJson.model || 'gemini-4-argon';
+function getRedirectConfig() {
+  const cfgDir = config.storagePath ? path.dirname(config.storagePath) : (process.env.ProgramData ? path.join(process.env.ProgramData, 'geminUp', 'argon') : __dirname);
+  const cfgPath = path.join(cfgDir, 'redirect-config.json');
+  try {
+    if (fs.existsSync(cfgPath)) {
+      const data = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      return {
+        enabled: data.redirectSonnetToArgon !== false,
+        failClosed: data.failClosed !== false,
+      };
+    }
+  } catch { }
+  return { enabled: true, failClosed: true };
+}
+
+// Transparent upstream proxy to real Google Cloud Code endpoint for metadata & handshake
+async function forwardToGoogleCloudCode(req, res, reqBuffer) {
+  return new Promise((resolve) => {
+    const upstreamUrl = new URL(req.url, 'https://daily-cloudcode-pa.googleapis.com');
+    const headers = { ...req.headers };
+    delete headers.host;
+    headers['host'] = 'daily-cloudcode-pa.googleapis.com';
+    if (reqBuffer && reqBuffer.length > 0) {
+      headers['content-length'] = String(reqBuffer.length);
+    } else {
+      delete headers['content-length'];
+    }
+
+    const options = {
+      hostname: 'daily-cloudcode-pa.googleapis.com',
+      port: 443,
+      path: upstreamUrl.pathname + upstreamUrl.search,
+      method: req.method,
+      headers,
+      agent: httpAgent,
+      timeout: 15000,
+    };
+
+    const upstreamReq = https.request(options, (upstreamRes) => {
+      res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+      upstreamRes.pipe(res);
+      upstreamRes.on('end', resolve);
+    });
+
+    upstreamReq.on('error', (err) => {
+      console.error(`[Argon Gateway] Upstream Cloud Code proxy error: ${err.message}`);
+      if (!res.headersSent) {
+        sendError(res, 502, `Cloud Code upstream error: ${err.message}`);
+      }
+      resolve();
+    });
+
+    if (reqBuffer && reqBuffer.length > 0) {
+      upstreamReq.write(reqBuffer);
+    }
+    upstreamReq.end();
+  });
+}
+
+// Forward available models from Google Cloud Code, enriching with Gemini 4 Argon
+async function forwardAvailableModels(req, res, reqBuffer) {
+  return new Promise((resolve) => {
+    const upstreamUrl = new URL(req.url, 'https://daily-cloudcode-pa.googleapis.com');
+    const headers = { ...req.headers };
+    delete headers.host;
+    headers['host'] = 'daily-cloudcode-pa.googleapis.com';
+    if (reqBuffer && reqBuffer.length > 0) {
+      headers['content-length'] = String(reqBuffer.length);
+    } else {
+      delete headers['content-length'];
+    }
+
+    const options = {
+      hostname: 'daily-cloudcode-pa.googleapis.com',
+      port: 443,
+      path: upstreamUrl.pathname + upstreamUrl.search,
+      method: req.method,
+      headers,
+      agent: httpAgent,
+      timeout: 15000,
+    };
+
+    const upstreamReq = https.request(options, (upstreamRes) => {
+      const chunks = [];
+      upstreamRes.on('data', (c) => chunks.push(c));
+      upstreamRes.on('end', () => {
+        const fullBuf = Buffer.concat(chunks);
+        try {
+          const json = JSON.parse(fullBuf.toString('utf8'));
+          if (json && json.models) {
+            json.models['gemini-4-argon'] = {
+              displayName: 'Gemini 4 Argon (geminUp Unlocked)',
+              description: 'Autonomous high-reasoning engine with Agent Mode quota',
+              supportsImages: true,
+              supportsThinking: true,
+              minThinkingBudget: 128,
+              recommended: true,
+              maxTokens: 1048576,
+              maxOutputTokens: 65535,
+              quotaInfo: {
+                remainingFraction: 1.0,
+                resetTime: '2099-01-01T00:00:00Z',
+              },
+              model: 'MODEL_PLACEHOLDER_M198',
+              apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
+              modelProvider: 'MODEL_PROVIDER_GOOGLE',
+              supportsVideo: true,
+            };
+            const outBuf = Buffer.from(JSON.stringify(json), 'utf8');
+            const resHeaders = { ...upstreamRes.headers };
+            resHeaders['content-length'] = String(outBuf.length);
+            res.writeHead(upstreamRes.statusCode, resHeaders);
+            res.end(outBuf);
+            return resolve();
+          }
+        } catch { }
+
+        res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+        res.end(fullBuf);
+        resolve();
+      });
+    });
+
+    upstreamReq.on('error', (err) => {
+      console.error(`[Argon Gateway] Available models proxy error: ${err.message}`);
+      if (!res.headersSent) {
+        sendError(res, 502, `Available models upstream error: ${err.message}`);
+      }
+      resolve();
+    });
+
+    if (reqBuffer && reqBuffer.length > 0) {
+      upstreamReq.write(reqBuffer);
+    }
+    upstreamReq.end();
+  });
+}
+
+async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStream = true) {
+  const redirectConfig = getRedirectConfig();
+  const rawModel = String(bodyJson.model || '').toLowerCase();
+  const isTargeted = rawModel.includes('sonnet') || rawModel.includes('argon') || rawModel.includes('flash') || rawModel.includes('opus');
+
+  // If redirect is disabled or this model is not targeted for pool routing, pass through to Google Cloud Code
+  if (!redirectConfig.enabled || !isTargeted) {
+    return await forwardToGoogleCloudCode(req, res, rawBuf);
+  }
+
   let prompt = '';
   if (Array.isArray(bodyJson.contents)) {
     prompt = formatCloudCodeContentsToPrompt(bodyJson.contents, bodyJson.systemInstruction);
@@ -426,12 +576,15 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, isStream = tru
 
   let account = pool.getActiveAccount();
   if (!account) {
-    return sendError(
-      res,
-      429,
-      'All Google accounts in pool are currently exhausted or unavailable. Add a healthy account via geminUp menu.',
-      'quota_exhausted',
-    );
+    if (redirectConfig.failClosed) {
+      return sendError(
+        res,
+        429,
+        'All Google accounts in pool are currently exhausted or unavailable. Fail-Closed quota protection engaged.',
+        'quota_exhausted',
+      );
+    }
+    return await forwardToGoogleCloudCode(req, res, rawBuf);
   }
 
   let attempts = 0;
@@ -444,7 +597,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, isStream = tru
         await pool.refreshAccountSession(account);
       }
 
-      const upstreamId = resolveModelUpstream(modelName, account);
+      const upstreamId = resolveModelUpstream(bodyJson.model, account);
       const capacity = account.modelCapacity || 1;
       const capacityField = account.modelCapacityField || 12;
       const modelHeader = buildModelHeader(upstreamId, capacity, capacityField);
@@ -483,6 +636,20 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, isStream = tru
       if (upstreamRes.status >= 400) {
         throw new Error(`Gemini upstream returned HTTP ${upstreamRes.status}`);
       }
+
+      // Record successful request and update local quota metrics
+      account.requestsServed = (account.requestsServed || 0) + 1;
+      if (account.quota && Array.isArray(account.quota.items)) {
+        const ag = account.quota.items.find((x) => x.action === 12);
+        if (ag && typeof ag.remaining === 'number' && ag.remaining > 0) {
+          ag.remaining--;
+          if (ag.limit) {
+            ag.usedPercent = Math.min(100, Math.round(((ag.limit - ag.remaining) / ag.limit) * 100));
+          }
+        }
+      }
+      account.lastUsedAt = new Date().toISOString();
+      pool.save();
 
       if (isStream) {
         res.writeHead(200, {
@@ -559,17 +726,12 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, isStream = tru
           res.end();
         });
 
-        account.lastUsedAt = new Date().toISOString();
-        pool.save();
         return;
       }
 
       const fullText = await upstreamRes.text();
       const { frames } = parseGoogleFrames(fullText);
       const parsed = parseGeminiStream(frames);
-
-      account.lastUsedAt = new Date().toISOString();
-      pool.save();
 
       return sendJson(res, 200, {
         response: {
@@ -599,53 +761,15 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, isStream = tru
 
       account = pool.getActiveAccount();
       if (!account) {
-        return sendError(res, 429, 'All accounts exhausted during failover.', 'quota_exhausted');
+        if (redirectConfig.failClosed) {
+          return sendError(res, 429, 'All accounts in geminUp pool exhausted during failover. Primary project protected.', 'quota_exhausted');
+        }
+        return await forwardToGoogleCloudCode(req, res, rawBuf);
       }
     }
   }
 
   return sendError(res, 502, 'Failed to complete Cloud Code generation after exhausting failover pool.', 'upstream_error');
-}
-
-// HTTP Server
-// Transparent upstream proxy to real Google Cloud Code endpoint for metadata & handshake
-async function forwardToGoogleCloudCode(req, res, reqBuffer) {
-  return new Promise((resolve) => {
-    const upstreamUrl = new URL(req.url, 'https://daily-cloudcode-pa.googleapis.com');
-    const headers = { ...req.headers };
-    delete headers.host;
-    delete headers['content-length'];
-    headers['host'] = 'daily-cloudcode-pa.googleapis.com';
-
-    const options = {
-      hostname: 'daily-cloudcode-pa.googleapis.com',
-      port: 443,
-      path: upstreamUrl.pathname + upstreamUrl.search,
-      method: req.method,
-      headers,
-      agent: httpAgent,
-      timeout: 15000,
-    };
-
-    const upstreamReq = https.request(options, (upstreamRes) => {
-      res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
-      upstreamRes.pipe(res);
-      upstreamRes.on('end', resolve);
-    });
-
-    upstreamReq.on('error', (err) => {
-      console.error(`[Argon Gateway] Upstream Cloud Code proxy error: ${err.message}`);
-      if (!res.headersSent) {
-        sendError(res, 502, `Cloud Code upstream error: ${err.message}`);
-      }
-      resolve();
-    });
-
-    if (reqBuffer && reqBuffer.length > 0) {
-      upstreamReq.write(reqBuffer);
-    }
-    upstreamReq.end();
-  });
 }
 
 const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => {
@@ -703,27 +827,16 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
     }
   }
 
-  // Antigravity Cloud Code Protocol: fetchAvailableModels
-  if ((req.method === 'GET' || req.method === 'POST') && (pathname === '/v1internal:fetchAvailableModels' || pathname.endsWith(':fetchAvailableModels'))) {
-    return sendJson(res, 200, CLOUD_CODE_CATALOG);
+  // Antigravity Cloud Code Protocol: fetchAvailableModels (proxied and enriched with Gemini 4 Argon)
+  if (pathname.includes(':fetchAvailableModels')) {
+    const rawBuf = await readRawBody();
+    return await forwardAvailableModels(req, res, rawBuf);
   }
 
   // Antigravity Cloud Code Protocol: retrieveUserQuotaSummary / retrieveUserQuota
-  if (req.method === 'POST' && (pathname === '/v1internal:retrieveUserQuotaSummary' || pathname === '/v1internal:retrieveUserQuota' || pathname.includes(':retrieveUserQuota'))) {
-    return sendJson(res, 200, {
-      buckets: [
-        {
-          quotaType: 'QUOTA_TYPE_AGENT',
-          remainingFraction: 1.0,
-          resetTime: '2099-01-01T00:00:00Z',
-        },
-        {
-          quotaType: 'QUOTA_TYPE_CHAT',
-          remainingFraction: 1.0,
-          resetTime: '2099-01-01T00:00:00Z',
-        },
-      ],
-    });
+  if (pathname.includes(':retrieveUserQuotaSummary') || pathname.includes(':retrieveUserQuota')) {
+    const rawBuf = await readRawBody();
+    return await forwardToGoogleCloudCode(req, res, rawBuf);
   }
 
   // Antigravity Cloud Code Protocol: countTokens
@@ -738,13 +851,13 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
     }
   }
 
-  // Antigravity Cloud Code Protocol: streamGenerateContent / generateContent
+  // Antigravity Cloud Code Protocol: streamGenerateContent / generateContent (Interception & Ultra-Quota Routing)
   if (req.method === 'POST' && (pathname === '/v1internal:streamGenerateContent' || pathname === '/v1internal:generateContent' || pathname.endsWith(':streamGenerateContent') || pathname.endsWith(':generateContent'))) {
     try {
       const rawBuf = await readRawBody();
       const body = parseJsonBody(rawBuf);
       const isStream = parsedUrl.searchParams.get('alt') === 'sse' || pathname.includes('streamGenerateContent');
-      return await handleCloudCodeGenerateContent(req, res, body, isStream);
+      return await handleCloudCodeGenerateContent(req, res, body, rawBuf, isStream);
     } catch (err) {
       return sendError(res, 400, err.message);
     }

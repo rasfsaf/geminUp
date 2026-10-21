@@ -241,6 +241,7 @@ class AccountPool {
       status: 'standby',
       exhaustedUntil: null,
       errorReason: null,
+      requestsServed: 0,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       lastUsedAt: null,
@@ -410,6 +411,18 @@ class AccountPool {
     acc.exhaustedUntil = resetTime;
     acc.updatedAt = new Date().toISOString();
     console.warn(`[Argon Pool] Account "${acc.label}" (${acc.id}) marked exhausted until ${resetTime}`);
+
+    // Rotate active pointer to the next standby account if needed
+    if (this.activeAccountId === accountId) {
+      const next = this.accounts.find((a) => a.id !== accountId && a.status === 'standby');
+      if (next) {
+        this.activeAccountId = next.id;
+        next.status = 'active';
+        console.info(`[Argon Pool] Rotated active account to standby "${next.label}" (${next.id})`);
+      } else {
+        console.warn('[Argon Pool] All accounts in pool are currently exhausted or unavailable.');
+      }
+    }
     this.save();
   }
 
@@ -419,6 +432,16 @@ class AccountPool {
     acc.status = 'error';
     acc.errorReason = reason;
     acc.updatedAt = new Date().toISOString();
+    console.warn(`[Argon Pool] Account "${acc.label}" (${acc.id}) marked error: ${reason}`);
+
+    if (this.activeAccountId === accountId) {
+      const next = this.accounts.find((a) => a.id !== accountId && a.status === 'standby');
+      if (next) {
+        this.activeAccountId = next.id;
+        next.status = 'active';
+        console.info(`[Argon Pool] Errored active account rotated to standby "${next.label}" (${next.id})`);
+      }
+    }
     this.save();
   }
 
@@ -457,7 +480,9 @@ class AccountPool {
         exhaustedUntil: a.exhaustedUntil,
         modelsCount: a.availableModels?.length || 0,
         quota: a.quota,
+        requestsServed: a.requestsServed || 0,
         lastKeepAliveAt: a.lastKeepAliveAt,
+        lastUsedAt: a.lastUsedAt,
       })),
     };
   }
