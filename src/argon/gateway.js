@@ -3,6 +3,14 @@ const https = require('node:https');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+
+// Global crash protection against abrupt client socket disconnections
+process.on('uncaughtException', (err) => {
+  console.error(`[Argon Gateway] Protected from uncaught error: ${err.message}`);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error(`[Argon Gateway] Protected from unhandled rejection:`, reason);
+});
 const { AccountPool, BASE_URL, USER_AGENT } = require('./account-pool');
 const { KeepAliveManager } = require('./keepalive-manager');
 const { createAgent, doRequest } = require('./http-client');
@@ -769,7 +777,15 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         let accumulatedContent = '';
         let streamRemainder = '';
 
+        // Handle client connection closing prematurely
+        req.on('close', () => {
+          if (upstreamRes && upstreamRes.body && typeof upstreamRes.body.destroy === 'function') {
+            upstreamRes.body.destroy();
+          }
+        });
+
         upstreamRes.body.on('data', (chunk) => {
+          if (res.writableEnded || res.destroyed) return;
           streamRemainder += chunk.toString('utf8');
           const { frames, remainder } = parseGoogleFrames(streamRemainder);
           streamRemainder = remainder;
@@ -794,7 +810,9 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
                     ],
                   },
                 };
-                res.write(`data: ${JSON.stringify(ccDelta)}\n\n`);
+                if (!res.writableEnded && !res.destroyed) {
+                  res.write(`data: ${JSON.stringify(ccDelta)}\n\n`);
+                }
               }
             } catch (pErr) {
               if (pErr.upstreamStatus === 429) {
@@ -805,13 +823,14 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         });
 
         upstreamRes.body.on('end', () => {
+          if (res.writableEnded || res.destroyed) return;
           const finalCc = {
             response: {
               candidates: [
                 {
                   content: {
                     role: 'model',
-                    parts: [],
+                    parts: [{ text: '' }],
                   },
                   finishReason: 'STOP',
                 },
@@ -824,13 +843,14 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
             },
           };
           res.write(`data: ${JSON.stringify(finalCc)}\n\n`);
-          res.write('data: [DONE]\n\n');
+          // Note: In Google Cloud Code protocol, SSE streams terminate with finishReason: 'STOP' and connection close.
+          // Strictly DO NOT send 'data: [DONE]' because Go's Protobuf parser treats it as an invalid proto token '['.
           res.end();
         });
 
         upstreamRes.body.on('error', (err) => {
           console.error(`[Argon Gateway] Cloud Code stream error: ${err.message}`);
-          res.end();
+          if (!res.writableEnded && !res.destroyed) res.end();
         });
 
         return;
