@@ -1,4 +1,5 @@
 const http = require('node:http');
+const https = require('node:https');
 const crypto = require('node:crypto');
 const { AccountPool, BASE_URL, USER_AGENT } = require('./account-pool');
 const { createAgent, doRequest } = require('./http-client');
@@ -607,6 +608,46 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, isStream = tru
 }
 
 // HTTP Server
+// Transparent upstream proxy to real Google Cloud Code endpoint for metadata & handshake
+async function forwardToGoogleCloudCode(req, res, reqBuffer) {
+  return new Promise((resolve) => {
+    const upstreamUrl = new URL(req.url, 'https://daily-cloudcode-pa.googleapis.com');
+    const headers = { ...req.headers };
+    delete headers.host;
+    delete headers['content-length'];
+    headers['host'] = 'daily-cloudcode-pa.googleapis.com';
+
+    const options = {
+      hostname: 'daily-cloudcode-pa.googleapis.com',
+      port: 443,
+      path: upstreamUrl.pathname + upstreamUrl.search,
+      method: req.method,
+      headers,
+      agent: httpAgent,
+      timeout: 15000,
+    };
+
+    const upstreamReq = https.request(options, (upstreamRes) => {
+      res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+      upstreamRes.pipe(res);
+      upstreamRes.on('end', resolve);
+    });
+
+    upstreamReq.on('error', (err) => {
+      console.error(`[Argon Gateway] Upstream Cloud Code proxy error: ${err.message}`);
+      if (!res.headersSent) {
+        sendError(res, 502, `Cloud Code upstream error: ${err.message}`);
+      }
+      resolve();
+    });
+
+    if (reqBuffer && reqBuffer.length > 0) {
+      upstreamReq.write(reqBuffer);
+    }
+    upstreamReq.end();
+  });
+}
+
 const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => {
   const parsedUrl = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
   const pathname = parsedUrl.pathname;
@@ -631,25 +672,31 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
     return sendJson(res, 200, { object: 'list', data: SUPPORTED_MODELS });
   }
 
-  // Read request body helper
-  const readBody = () => new Promise((resolve, reject) => {
+  // Read raw request body helper (supporting both Buffer and parsed JSON)
+  const readRawBody = () => new Promise((resolve, reject) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
-    req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8');
-      try {
-        resolve(raw ? JSON.parse(raw) : {});
-      } catch (e) {
-        reject(new Error(`Invalid JSON body: ${e.message}`));
-      }
-    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 
-  // Chat completions
+  const parseJsonBody = (buf) => {
+    const raw = buf.toString('utf8');
+    return raw ? JSON.parse(raw) : {};
+  };
+
+  // Antigravity Cloud Code Protocol: forward non-inference handshake calls to Google Cloud
+  // (loadCodeAssist, fetchUserInfo, onboardUser, etc.)
+  if (pathname.includes(':loadCodeAssist') || pathname.includes(':fetchUserInfo') || pathname.includes(':onboardUser')) {
+    const rawBuf = await readRawBody();
+    return await forwardToGoogleCloudCode(req, res, rawBuf);
+  }
+
+  // Chat completions (OpenAI format for external IDE extensions)
   if (req.method === 'POST' && pathname === '/v1/chat/completions') {
     try {
-      const body = await readBody();
+      const rawBuf = await readRawBody();
+      const body = parseJsonBody(rawBuf);
       return await handleChatCompletions(req, res, body);
     } catch (err) {
       return sendError(res, 400, err.message);
@@ -659,27 +706,6 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
   // Antigravity Cloud Code Protocol: fetchAvailableModels
   if ((req.method === 'GET' || req.method === 'POST') && (pathname === '/v1internal:fetchAvailableModels' || pathname.endsWith(':fetchAvailableModels'))) {
     return sendJson(res, 200, CLOUD_CODE_CATALOG);
-  }
-
-  // Antigravity Cloud Code Protocol: loadCodeAssist
-  if (req.method === 'POST' && (pathname === '/v1internal:loadCodeAssist' || pathname.endsWith(':loadCodeAssist'))) {
-    return sendJson(res, 200, {
-      userTier: {
-        id: 'tier_enterprise_unlocked',
-        name: 'Antigravity Pro (geminUp Unlocked)',
-        description: 'Autonomous Agent Mode Enabled',
-      },
-      currentTier: 'tier_enterprise_unlocked',
-      ineligible: false,
-      allowedModelIds: [
-        'gemini-4-argon',
-        'gemini-4-argon-thinking-medium',
-        'gemini-3.8-flash',
-        'gemini-3.1-pro',
-        'claude-sonnet-4-6',
-        'claude-sonnet-4',
-      ],
-    });
   }
 
   // Antigravity Cloud Code Protocol: retrieveUserQuotaSummary / retrieveUserQuota
@@ -703,7 +729,8 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
   // Antigravity Cloud Code Protocol: countTokens
   if (req.method === 'POST' && (pathname === '/v1internal:countTokens' || pathname.endsWith(':countTokens'))) {
     try {
-      const body = await readBody();
+      const rawBuf = await readRawBody();
+      const body = parseJsonBody(rawBuf);
       const promptLen = JSON.stringify(body).length;
       return sendJson(res, 200, { totalTokens: Math.max(1, Math.round(promptLen / 4)) });
     } catch {
@@ -714,7 +741,8 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
   // Antigravity Cloud Code Protocol: streamGenerateContent / generateContent
   if (req.method === 'POST' && (pathname === '/v1internal:streamGenerateContent' || pathname === '/v1internal:generateContent' || pathname.endsWith(':streamGenerateContent') || pathname.endsWith(':generateContent'))) {
     try {
-      const body = await readBody();
+      const rawBuf = await readRawBody();
+      const body = parseJsonBody(rawBuf);
       const isStream = parsedUrl.searchParams.get('alt') === 'sse' || pathname.includes('streamGenerateContent');
       return await handleCloudCodeGenerateContent(req, res, body, isStream);
     } catch (err) {
@@ -736,7 +764,8 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
   // Admin API: Add Account
   if (req.method === 'POST' && (pathname === '/admin/api/accounts' || pathname === '/admin/api/cookies')) {
     try {
-      const body = await readBody();
+      const rawBuf = await readRawBody();
+      const body = parseJsonBody(rawBuf);
       const cookieData = body.cookie || body.raw || body;
       const label = body.label || body.note || '';
       const acc = await pool.addAccount(cookieData, label);
@@ -791,7 +820,9 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
     return sendJson(res, 200, { ok: true, status: pool.getStatus() });
   }
 
-  return sendError(res, 404, `Endpoint ${req.method} ${pathname} not found`);
+  // Default fallback for any other Cloud Code endpoints: forward transparently
+  const rawBuf = await readRawBody();
+  return await forwardToGoogleCloudCode(req, res, rawBuf);
 });
 
 server.listen(config.port, config.host, () => {
