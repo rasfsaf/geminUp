@@ -1107,11 +1107,26 @@ function Get-SonnetRedirectState {
     return $false
 }
 
+function Get-FlashRedirectState {
+    $cfgFile = Join-Path $script:ArgonDir 'redirect-config.json'
+    if (Test-Path -LiteralPath $cfgFile) {
+        try {
+            $data = Get-Content -LiteralPath $cfgFile -Raw -Encoding utf8 | ConvertFrom-Json
+            if ($data.PSObject.Properties.Name -contains 'redirectFlashToPool') {
+                return [bool]$data.redirectFlashToPool
+            }
+        } catch { }
+    }
+    return $false
+}
+
 function Set-SonnetRedirectState {
     param([bool]$Enabled)
     $cfgFile = Join-Path $script:ArgonDir 'redirect-config.json'
+    $currentFlash = Get-FlashRedirectState
     $obj = @{
         redirectSonnetToArgon = $Enabled
+        redirectFlashToPool = $currentFlash
         targetModel = 'claude-sonnet-4-6'
         failClosed = $true
         updatedAt = (Get-Date).ToString('o')
@@ -1119,6 +1134,37 @@ function Set-SonnetRedirectState {
     $json = ConvertTo-Json -InputObject $obj -Compress
     [System.IO.File]::WriteAllText($cfgFile, $json, [System.Text.Encoding]::UTF8)
     return $Enabled
+}
+
+function Set-FlashRedirectState {
+    param([bool]$Enabled)
+    $cfgFile = Join-Path $script:ArgonDir 'redirect-config.json'
+    $currentSonnet = Get-SonnetRedirectState
+    $obj = @{
+        redirectSonnetToArgon = $currentSonnet
+        redirectFlashToPool = $Enabled
+        targetModel = 'claude-sonnet-4-6'
+        failClosed = $true
+        updatedAt = (Get-Date).ToString('o')
+    }
+    $json = ConvertTo-Json -InputObject $obj -Compress
+    [System.IO.File]::WriteAllText($cfgFile, $json, [System.Text.Encoding]::UTF8)
+    return $Enabled
+}
+
+function Switch-AntigravityFlashRouting {
+    $current = Get-FlashRedirectState
+    $newState = -not $current
+    Set-FlashRedirectState -Enabled $newState | Out-Null
+    Write-Host ''
+    if ($newState) {
+        Write-TransportLog OK 'Gemini Flash -> Ultra-Quota Pool Redirection: ENABLED.'
+        Write-Host '  All Flash requests in Antigravity are now routed through the 7-account pool.' -ForegroundColor Green
+    } else {
+        Write-TransportLog OK 'Gemini Flash -> Ultra-Quota Pool Redirection: OPTIONAL (Dedicated model only).'
+        Write-Host '  Standard Flash requests go direct to Cloud Code; dedicated "Gemini Flash (geminUp Ultra-Quota)" uses the pool.' -ForegroundColor White
+    }
+    Write-Host ''
 }
 
 function Switch-AntigravityArgonRouting {
@@ -2655,6 +2701,10 @@ function Show-ArgonMenu {
         $sonnetRouting = if ($isRouted) { 'ENABLED (Claude Sonnet 4.6 -> Gemini 4 Argon [Fail-Closed])' } else { 'DISABLED (Direct Google Cloud)' }
         $routingColor = if ($isRouted) { 'Green' } else { 'DarkGray' }
 
+        $flashRedirect = Get-FlashRedirectState
+        $flashRouting = if ($flashRedirect) { 'ALL FLASH -> ULTRA-QUOTA POOL (7 Accounts)' } else { 'DIRECT CLOUD CODE (Dedicated model available)' }
+        $flashColor = if ($flashRedirect) { 'Green' } else { 'Cyan' }
+
         Write-Host '==================================================' -ForegroundColor Cyan
         Write-Host '  Gemini 4 Argon Pipeline (Native Gateway Engine)' -ForegroundColor Cyan
         Write-Host '  Developer Blog: https://t.me/iqsklad20          ' -ForegroundColor Magenta
@@ -2663,6 +2713,8 @@ function Show-ArgonMenu {
         Write-Host $statusLabel -ForegroundColor $statusColor
         Write-Host -NoNewline '  Sonnet 4.6 -> Argon:  '
         Write-Host $sonnetRouting -ForegroundColor $routingColor
+        Write-Host -NoNewline '  Flash Ultra-Quota:    '
+        Write-Host $flashRouting -ForegroundColor $flashColor
         Write-Host -NoNewline '  Account Pool:         '
         Write-Host $acctLabel -ForegroundColor $acctColor
         Write-Host "  Auto Health Keeper:   24h Idle Ping (5m Cooldown, Windows Uptime Tracked)" -ForegroundColor DarkCyan
@@ -2678,10 +2730,11 @@ function Show-ArgonMenu {
         Write-Host '  7. Toggle Claude Sonnet 4.6 -> Gemini 4 Argon Redirection'
         Write-Host '  8. Stop Argon Gateway'
         Write-Host '  9. Connection Instructions for IDE'
+        Write-Host '  10. Toggle Global Flash -> Ultra-Quota Pool'
         Write-Host '  0. Return to main menu'
         Write-Host ''
 
-        $sub = Read-Host 'Select 0-9'
+        $sub = Read-Host 'Select 0-10'
         try {
             switch ($sub) {
                 '1' { Start-ArgonBridge; Start-Sleep -Seconds 2; break }
@@ -2693,8 +2746,9 @@ function Show-ArgonMenu {
                 '7' { Switch-AntigravityArgonRouting; Start-Sleep -Seconds 2; break }
                 '8' { Stop-ArgonBridge; Start-Sleep -Seconds 1; break }
                 '9' { Show-ArgonConnectionInfo; Read-Host 'Press Enter to continue'; break }
+                '10' { Switch-AntigravityFlashRouting; Start-Sleep -Seconds 2; break }
                 '0' { return }
-                default { Write-TransportLog WARN 'Enter 0 through 9.'; Start-Sleep -Seconds 2; continue }
+                default { Write-TransportLog WARN 'Enter 0 through 10.'; Start-Sleep -Seconds 2; continue }
             }
         }
         catch {

@@ -180,6 +180,166 @@ function formatMessagesToPrompt(messages) {
   return parts.join('\n\n');
 }
 
+function extractToolsFromPayload(bodyJson) {
+  if (!bodyJson || typeof bodyJson !== 'object') return [];
+  const req = bodyJson.request || bodyJson;
+  const tools = req.tools || bodyJson.tools;
+  if (!Array.isArray(tools)) return [];
+  const declarations = [];
+  for (const t of tools) {
+    if (!t) continue;
+    if (Array.isArray(t.functionDeclarations)) {
+      for (const fn of t.functionDeclarations) {
+        if (fn && fn.name) declarations.push(fn);
+      }
+    } else if (Array.isArray(t.function_declarations)) {
+      for (const fn of t.function_declarations) {
+        if (fn && fn.name) declarations.push(fn);
+      }
+    } else if (t.type === 'function' && t.function) {
+      declarations.push(t.function);
+    } else if (t.name) {
+      declarations.push(t);
+    }
+  }
+  return declarations;
+}
+
+function buildToolInstructionPrompt(tools) {
+  if (!tools || tools.length === 0) return '';
+  const toolDefs = tools.map((t) => {
+    let schema = '';
+    try {
+      schema = JSON.stringify(t.parameters || {});
+    } catch {
+      schema = '{}';
+    }
+    return `### Tool: ${t.name}\nDescription: ${t.description || 'No description provided'}\nParameters Schema: ${schema}`;
+  }).join('\n\n');
+
+  return `[SYSTEM: WORKSPACE TOOL CAPABILITIES ENABLED]
+You are operating in an interactive Agentic workspace environment with direct access to local system tools and files.
+You have access to the following tools:
+
+${toolDefs}
+
+MANDATORY TOOL CALL INSTRUCTIONS:
+1. When you need to read a file, list files, run a command, search, or edit code, you MUST invoke the appropriate tool.
+2. NEVER say "I don't have access to files", "files were not loaded", or "tell me what to read". Instead, immediately use 'run_command' or 'read_file' to inspect the directory and files yourself!
+3. To call a tool, you MUST format the tool call in a dedicated \`\`\`tool_call markdown block:
+\`\`\`tool_call
+{
+  "name": "tool_name",
+  "args": {
+    "param_name": "value"
+  }
+}
+\`\`\`
+4. You may include concise natural language before the tool call explaining what you are doing.
+5. Once you output the tool call, execution pauses and the workspace will return the result in the next turn.
+[END OF TOOL INSTRUCTIONS]`;
+}
+
+function formatFunctionCall(fc) {
+  if (!fc) return '[Tool Call]';
+  const name = fc.name || 'tool';
+  const args = fc.args ? JSON.stringify(fc.args) : '{}';
+  return `[Tool Call: ${name}(${args})]`;
+}
+
+function formatFunctionResponse(fr) {
+  if (!fr) return '[Tool Result]';
+  const name = fr.name || 'tool';
+  const resp = fr.response;
+  if (!resp) return `[Tool Result: ${name} -> Empty]`;
+  if (typeof resp === 'string') return `[Tool Result: ${name}]\n${resp}`;
+  if (typeof resp.output === 'string') return `[Tool Result: ${name}]\n${resp.output}`;
+  if (typeof resp.content === 'string') return `[Tool Result: ${name}]\n${resp.content}`;
+  if (typeof resp.result === 'string') return `[Tool Result: ${name}]\n${resp.result}`;
+  return `[Tool Result: ${name}]\n${JSON.stringify(resp, null, 2)}`;
+}
+
+function extractToolCallsFromOutput(text) {
+  if (!text || typeof text !== 'string') return { toolCalls: [], cleanText: text || '' };
+
+  const toolCalls = [];
+  let cleanText = text;
+
+  function pushCall(item) {
+    if (!item || typeof item !== 'object') return;
+    const name = item.name || item.tool || item.function;
+    if (typeof name === 'string' && name.trim()) {
+      let args = item.args || item.parameters || item.arguments || {};
+      if (typeof args === 'string') {
+        try { args = JSON.parse(args); } catch {}
+      }
+      toolCalls.push({
+        name: name.trim(),
+        args: args || {},
+      });
+    }
+  }
+
+  function parseBlock(rawJson) {
+    try {
+      const trimmed = rawJson.trim();
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        for (const p of parsed) pushCall(p);
+      } else {
+        pushCall(parsed);
+      }
+    } catch {
+      try {
+        const cleaned = rawJson.replace(/,\s*([\]}])/g, '$1').trim();
+        const parsed = JSON.parse(cleaned);
+        if (Array.isArray(parsed)) {
+          for (const p of parsed) pushCall(p);
+        } else {
+          pushCall(parsed);
+        }
+      } catch {}
+    }
+  }
+
+  // 1. Fenced ```tool_call ... ```
+  const fencedRegex = /```(?:tool_call|toolcall|tool)\s*([\s\S]*?)\s*```/gi;
+  let match;
+  while ((match = fencedRegex.exec(text)) !== null) {
+    parseBlock(match[1]);
+  }
+  if (toolCalls.length > 0) {
+    cleanText = text.replace(fencedRegex, '').trim();
+    return { toolCalls, cleanText };
+  }
+
+  // 2. Fenced ```json ... ``` with name & args
+  const jsonFencedRegex = /```(?:json)?\s*(\{\s*"(?:name|tool)"\s*:\s*"[^"]+"\s*,\s*"(?:args|parameters|arguments)"\s*:[\s\S]*?\})\s*```/gi;
+  while ((match = jsonFencedRegex.exec(text)) !== null) {
+    parseBlock(match[1]);
+  }
+  if (toolCalls.length > 0) {
+    cleanText = text.replace(jsonFencedRegex, '').trim();
+    return { toolCalls, cleanText };
+  }
+
+  // 3. Raw JSON object containing "name" and "args" (if the model didn't use fences)
+  const bareRegex = /\{\s*"(?:name|tool)"\s*:\s*"([a-zA-Z0-9_\-]+)"\s*,\s*"(?:args|parameters|arguments)"\s*:\s*(\{[\s\S]*?\})\s*\}/g;
+  while ((match = bareRegex.exec(text)) !== null) {
+    try {
+      const name = match[1];
+      const args = JSON.parse(match[2]);
+      toolCalls.push({ name, args: args || {} });
+    } catch {}
+  }
+  if (toolCalls.length > 0) {
+    cleanText = text.replace(bareRegex, '').trim();
+    return { toolCalls, cleanText };
+  }
+
+  return { toolCalls: [], cleanText: text };
+}
+
 function formatCloudCodeContentsToPrompt(contents, systemInstruction) {
   const parts = [];
   if (systemInstruction && Array.isArray(systemInstruction.parts)) {
@@ -194,8 +354,8 @@ function formatCloudCodeContentsToPrompt(contents, systemInstruction) {
         if (typeof p === 'string') textParts.push(p);
         else if (p && p.text) textParts.push(p.text);
         else if (p && p.inlineData) textParts.push(`[Attached Data: ${p.inlineData.mimeType || 'binary'}]`);
-        else if (p && p.functionCall) textParts.push(`[Tool Call: ${p.functionCall.name}(${JSON.stringify(p.functionCall.args || {})})]`);
-        else if (p && p.functionResponse) textParts.push(`[Tool Result: ${p.functionResponse.name} -> ${JSON.stringify(p.functionResponse.response || {})}]`);
+        else if (p && p.functionCall) textParts.push(formatFunctionCall(p.functionCall));
+        else if (p && p.functionResponse) textParts.push(formatFunctionResponse(p.functionResponse));
       }
       if (textParts.length > 0) {
         parts.push(`[${role}]\n${textParts.join('\n')}`);
@@ -216,6 +376,12 @@ function extractPromptFromAnyPayload(bodyJson) {
   const turns = req.turns || bodyJson.turns || req.history || bodyJson.history;
 
   const parts = [];
+
+  // Extract Tools from payload and prepend tool calling capabilities
+  const tools = extractToolsFromPayload(bodyJson);
+  if (tools.length > 0) {
+    parts.push(buildToolInstructionPrompt(tools));
+  }
 
   // Extract System Instruction
   if (typeof sysInst === 'string' && sysInst.trim()) {
@@ -250,8 +416,8 @@ function extractPromptFromAnyPayload(bodyJson) {
           else if (p.text) textParts.push(p.text);
           else if (p.content) textParts.push(typeof p.content === 'string' ? p.content : JSON.stringify(p.content));
           else if (p.inlineData) textParts.push(`[Attached Data: ${p.inlineData.mimeType || 'binary'}]`);
-          else if (p.functionCall) textParts.push(`[Tool Call: ${p.functionCall.name}(${JSON.stringify(p.functionCall.args || {})})]`);
-          else if (p.functionResponse) textParts.push(`[Tool Result: ${p.functionResponse.name} -> ${JSON.stringify(p.functionResponse.response || {})}]`);
+          else if (p.functionCall) textParts.push(formatFunctionCall(p.functionCall));
+          else if (p.functionResponse) textParts.push(formatFunctionResponse(p.functionResponse));
         }
       }
       if (textParts.length > 0) {
@@ -265,6 +431,15 @@ function extractPromptFromAnyPayload(bodyJson) {
     for (const m of messages) {
       if (!m) continue;
       const role = String(m.role || 'user').toUpperCase();
+      if (m.tool_calls && Array.isArray(m.tool_calls)) {
+        for (const tc of m.tool_calls) {
+          parts.push(`[ASSISTANT TOOL CALL: ${tc.function?.name || 'tool'}(${tc.function?.arguments || '{}'})]`);
+        }
+      }
+      if (role === 'TOOL') {
+        parts.push(`[TOOL RESULT: ${m.name || 'tool'}]\n${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`);
+        continue;
+      }
       const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
       parts.push(`[${role}]\n${content}`);
     }
@@ -332,7 +507,7 @@ function sendError(res, statusCode, message, type = 'invalid_request_error') {
 async function handleChatCompletions(req, res, bodyJson) {
   const modelName = bodyJson.model || 'gemini-4-argon';
   const isStream = Boolean(bodyJson.stream);
-  const prompt = formatMessagesToPrompt(bodyJson.messages);
+  const prompt = extractPromptFromAnyPayload(bodyJson);
 
   if (!prompt.trim()) {
     return sendError(res, 400, 'Messages payload cannot be empty');
@@ -413,6 +588,7 @@ async function handleChatCompletions(req, res, bodyJson) {
 
         let accumulatedContent = '';
         let streamRemainder = '';
+        let streamedLength = 0;
 
         upstreamRes.body.on('data', (chunk) => {
           streamRemainder += chunk.toString('utf8');
@@ -423,23 +599,33 @@ async function handleChatCompletions(req, res, bodyJson) {
             try {
               const parsed = parseGeminiStream(frames);
               if (parsed.content && parsed.content.length > accumulatedContent.length) {
-                const deltaText = parsed.content.slice(accumulatedContent.length);
                 accumulatedContent = parsed.content;
 
-                const chunkPayload = {
-                  id: cmplId,
-                  object: 'chat.completion.chunk',
-                  created,
-                  model: modelName,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: { content: deltaText },
-                      finish_reason: null,
-                    },
-                  ],
-                };
-                res.write(`data: ${JSON.stringify(chunkPayload)}\n\n`);
+                const toolTagIdx = accumulatedContent.search(/```(?:tool_call|toolcall|tool)/i);
+                let streamable = accumulatedContent;
+                if (toolTagIdx !== -1) {
+                  streamable = accumulatedContent.slice(0, toolTagIdx);
+                }
+
+                if (streamable.length > streamedLength) {
+                  const deltaText = streamable.slice(streamedLength);
+                  streamedLength = streamable.length;
+
+                  const chunkPayload = {
+                    id: cmplId,
+                    object: 'chat.completion.chunk',
+                    created,
+                    model: modelName,
+                    choices: [
+                      {
+                        index: 0,
+                        delta: { content: deltaText },
+                        finish_reason: null,
+                      },
+                    ],
+                  };
+                  res.write(`data: ${JSON.stringify(chunkPayload)}\n\n`);
+                }
               }
             } catch (pErr) {
               if (pErr.upstreamStatus === 429) {
@@ -450,20 +636,58 @@ async function handleChatCompletions(req, res, bodyJson) {
         });
 
         upstreamRes.body.on('end', () => {
-          const finalChunk = {
-            id: cmplId,
-            object: 'chat.completion.chunk',
-            created,
-            model: modelName,
-            choices: [
-              {
-                index: 0,
-                delta: {},
-                finish_reason: 'stop',
-              },
-            ],
-          };
-          res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+          const { toolCalls, cleanText } = extractToolCallsFromOutput(accumulatedContent);
+          if (toolCalls.length > 0) {
+            const toolChunk = {
+              id: cmplId,
+              object: 'chat.completion.chunk',
+              created,
+              model: modelName,
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    tool_calls: toolCalls.map((c, idx) => ({
+                      index: idx,
+                      id: `call_${crypto.randomBytes(8).toString('hex')}`,
+                      type: 'function',
+                      function: {
+                        name: c.name,
+                        arguments: JSON.stringify(c.args),
+                      },
+                    })),
+                  },
+                  finish_reason: 'tool_calls',
+                },
+              ],
+            };
+            res.write(`data: ${JSON.stringify(toolChunk)}\n\n`);
+          } else {
+            if (accumulatedContent.length > streamedLength) {
+              const remaining = accumulatedContent.slice(streamedLength);
+              res.write(`data: ${JSON.stringify({
+                id: cmplId,
+                object: 'chat.completion.chunk',
+                created,
+                model: modelName,
+                choices: [{ index: 0, delta: { content: remaining }, finish_reason: null }],
+              })}\n\n`);
+            }
+            const finalChunk = {
+              id: cmplId,
+              object: 'chat.completion.chunk',
+              created,
+              model: modelName,
+              choices: [
+                {
+                  index: 0,
+                  delta: {},
+                  finish_reason: 'stop',
+                },
+              ],
+            };
+            res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+          }
           res.write('data: [DONE]\n\n');
           res.end();
         });
@@ -482,9 +706,27 @@ async function handleChatCompletions(req, res, bodyJson) {
       const fullText = await upstreamRes.text();
       const { frames } = parseGoogleFrames(fullText);
       const parsed = parseGeminiStream(frames);
+      const { toolCalls, cleanText } = extractToolCallsFromOutput(parsed.content || '');
 
       account.lastUsedAt = new Date().toISOString();
       pool.save();
+
+      const message = {
+        role: 'assistant',
+        content: cleanText || (toolCalls.length ? null : parsed.content || ''),
+      };
+      let finish_reason = 'stop';
+      if (toolCalls.length > 0) {
+        message.tool_calls = toolCalls.map((c) => ({
+          id: `call_${crypto.randomBytes(8).toString('hex')}`,
+          type: 'function',
+          function: {
+            name: c.name,
+            arguments: JSON.stringify(c.args),
+          },
+        }));
+        finish_reason = 'tool_calls';
+      }
 
       return sendJson(res, 200, {
         id: cmplId,
@@ -494,11 +736,8 @@ async function handleChatCompletions(req, res, bodyJson) {
         choices: [
           {
             index: 0,
-            message: {
-              role: 'assistant',
-              content: parsed.content || '',
-            },
-            finish_reason: 'stop',
+            message,
+            finish_reason,
           },
         ],
         usage: {
@@ -534,11 +773,12 @@ function getRedirectConfig() {
       const data = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
       return {
         enabled: data.redirectSonnetToArgon !== false,
+        redirectFlashToPool: Boolean(data.redirectFlashToPool),
         failClosed: data.failClosed !== false,
       };
     }
   } catch { }
-  return { enabled: true, failClosed: true };
+  return { enabled: true, redirectFlashToPool: false, failClosed: true };
 }
 
 // Transparent upstream proxy to real Google Cloud Code endpoint for metadata & handshake
@@ -643,6 +883,23 @@ async function forwardAvailableModels(req, res, reqBuffer) {
               modelProvider: 'MODEL_PROVIDER_GOOGLE',
               supportsVideo: true,
             };
+            json.models['gemini-3.8-flash'] = {
+              displayName: 'Gemini Flash (geminUp Ultra-Quota)',
+              description: 'Ultra-low latency coding model backed by 7-account rotating pool',
+              supportsImages: true,
+              supportsThinking: false,
+              recommended: false,
+              maxTokens: 1048576,
+              maxOutputTokens: 65535,
+              quotaInfo: {
+                remainingFraction: 1.0,
+                resetTime: '2099-01-01T00:00:00Z',
+              },
+              model: 'MODEL_PLACEHOLDER_M198',
+              apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
+              modelProvider: 'MODEL_PROVIDER_GOOGLE',
+              supportsVideo: true,
+            };
             const outBuf = Buffer.from(JSON.stringify(json), 'utf8');
             const resHeaders = { ...upstreamRes.headers };
             resHeaders['content-length'] = String(outBuf.length);
@@ -686,7 +943,10 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
   const rawModel = String(bodyJson.model || bodyJson.request?.model || bodyJson.model_id || 'claude-sonnet-4-6').toLowerCase();
   const isArgon = rawModel.includes('argon');
   const isSonnet = rawModel.includes('sonnet');
-  const isTargeted = isArgon || (isSonnet && redirectConfig.enabled);
+  const isDedicatedFlash = rawModel.includes('gemini-3.8-flash') || rawModel.includes('ultra-quota');
+  const isGlobalFlashRedirect = redirectConfig.redirectFlashToPool && rawModel.includes('flash');
+  const isFlash = isDedicatedFlash || isGlobalFlashRedirect;
+  const isTargeted = isArgon || (isSonnet && redirectConfig.enabled) || isFlash;
 
   // If redirect is disabled or this model is not targeted for pool routing, pass through to Google Cloud Code
   if (!isTargeted) {
@@ -704,6 +964,8 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
     console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Claude Sonnet 4.6 request -> Redirecting to Gemini 4 Argon with Agent Mode quota (action: 12)`);
   } else if (isArgon) {
     console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini 4 Argon request -> Serving with Agent Mode quota (action: 12)`);
+  } else if (isFlash) {
+    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini Flash Ultra-Quota request -> Serving with 7-account pool`);
   }
 
   let account = pool.getActiveAccount();
@@ -821,6 +1083,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         let accumulatedContent = '';
         let accumulatedThoughts = '';
         let streamRemainder = '';
+        let streamedContentLength = 0;
 
         // Handle client connection closing prematurely
         req.on('close', () => {
@@ -861,26 +1124,36 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
                 }
               }
 
-              // Stream content
+              // Stream content safely without leaking raw tool_call blocks
               if (parsed.content && parsed.content.length > accumulatedContent.length) {
-                const deltaText = parsed.content.slice(accumulatedContent.length);
                 accumulatedContent = parsed.content;
 
-                const ccDelta = {
-                  response: {
-                    candidates: [
-                      {
-                        content: {
-                          role: 'model',
-                          parts: [{ text: deltaText }],
+                const toolTagIdx = accumulatedContent.search(/```(?:tool_call|toolcall|tool)/i);
+                let streamableText = accumulatedContent;
+                if (toolTagIdx !== -1) {
+                  streamableText = accumulatedContent.slice(0, toolTagIdx);
+                }
+
+                if (streamableText.length > streamedContentLength) {
+                  const deltaText = streamableText.slice(streamedContentLength);
+                  streamedContentLength = streamableText.length;
+
+                  const ccDelta = {
+                    response: {
+                      candidates: [
+                        {
+                          content: {
+                            role: 'model',
+                            parts: [{ text: deltaText }],
+                          },
+                          finishReason: null,
                         },
-                        finishReason: null,
-                      },
-                    ],
-                  },
-                };
-                if (!res.writableEnded && !res.destroyed) {
-                  res.write(`data: ${JSON.stringify(ccDelta)}\n\n`);
+                      ],
+                    },
+                  };
+                  if (!res.writableEnded && !res.destroyed) {
+                    res.write(`data: ${JSON.stringify(ccDelta)}\n\n`);
+                  }
                 }
               }
             } catch (pErr) {
@@ -893,6 +1166,67 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
         upstreamRes.body.on('end', () => {
           if (res.writableEnded || res.destroyed) return;
+
+          const { toolCalls, cleanText } = extractToolCallsFromOutput(accumulatedContent);
+
+          if (toolCalls.length > 0) {
+            const parts = [];
+            if (cleanText.length > streamedContentLength) {
+              const remainingText = cleanText.slice(streamedContentLength);
+              if (remainingText.trim().length > 0) {
+                parts.push({ text: remainingText });
+              }
+            }
+            for (const call of toolCalls) {
+              parts.push({
+                functionCall: {
+                  name: call.name,
+                  args: call.args,
+                },
+              });
+            }
+
+            const toolCc = {
+              response: {
+                candidates: [
+                  {
+                    content: {
+                      role: 'model',
+                      parts,
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+                usageMetadata: {
+                  promptTokenCount: Math.round(prompt.length / 4),
+                  candidatesTokenCount: Math.round(accumulatedContent.length / 4),
+                  totalTokenCount: Math.round((prompt.length + accumulatedContent.length) / 4),
+                },
+              },
+            };
+            res.write(`data: ${JSON.stringify(toolCc)}\n\n`);
+            res.end();
+            return;
+          }
+
+          if (accumulatedContent.length > streamedContentLength) {
+            const remainingText = accumulatedContent.slice(streamedContentLength);
+            const textChunk = {
+              response: {
+                candidates: [
+                  {
+                    content: {
+                      role: 'model',
+                      parts: [{ text: remainingText }],
+                    },
+                    finishReason: null,
+                  },
+                ],
+              },
+            };
+            res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+          }
+
           const finalCc = {
             response: {
               candidates: [
@@ -928,6 +1262,24 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
       const fullText = await upstreamRes.text();
       const { frames } = parseGoogleFrames(fullText);
       const parsed = parseGeminiStream(frames);
+      const { toolCalls, cleanText } = extractToolCallsFromOutput(parsed.content || '');
+
+      const parts = [];
+      if (cleanText && cleanText.trim().length > 0) {
+        parts.push({ text: cleanText });
+      }
+      if (toolCalls.length > 0) {
+        for (const call of toolCalls) {
+          parts.push({
+            functionCall: {
+              name: call.name,
+              args: call.args,
+            },
+          });
+        }
+      } else if (parts.length === 0) {
+        parts.push({ text: parsed.content || '' });
+      }
 
       return sendJson(res, 200, {
         response: {
@@ -935,7 +1287,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
             {
               content: {
                 role: 'model',
-                parts: [{ text: parsed.content || '' }],
+                parts,
               },
               finishReason: 'STOP',
             },
