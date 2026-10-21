@@ -2215,12 +2215,14 @@ function Show-ArgonAccounts {
             return
         }
 
+        $index = 1
         foreach ($acc in $poolData.accounts) {
             $isActive = ($acc.id -eq $poolData.activeAccountId)
             $prefix = if ($isActive) { '[ACTIVE] ' } else { ' [STANDBY]' }
             $color = if ($isActive) { 'Green' } else { 'White' }
 
-            Write-Host "$prefix $($acc.label) ($($acc.id))" -ForegroundColor $color
+            Write-Host "#$index $prefix $($acc.label) [ID: $($acc.id)]" -ForegroundColor $color
+            $index++
             Write-Host "         Status: $($acc.status) | Discovered Models: $($acc.modelsCount)" -ForegroundColor DarkGray
 
             if ($null -ne $acc.quota -and ($acc.quota.PSObject.Properties.Name -contains 'items')) {
@@ -2258,18 +2260,60 @@ function Remove-ArgonAccount {
         return
     }
 
-    Show-ArgonAccounts
-    $accId = Read-Host 'Enter Account ID to remove (or press Enter to cancel)'
-    if ([string]::IsNullOrWhiteSpace($accId)) { return }
-
     try {
-        $delResp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/admin/api/accounts/$($accId.Trim())" `
-            -Method Delete -TimeoutSec 5 -ErrorAction Stop
-        if ($delResp.ok -eq $true) {
-            Write-TransportLog OK "Account $($accId.Trim()) removed from pool."
+        $poolData = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/admin/api/status" -Method Get -TimeoutSec 5 -ErrorAction Stop
+        if ($poolData.accounts.Count -eq 0) {
+            Write-TransportLog WARN 'No accounts found in pool.'
+            return
         }
-        else {
-            Write-TransportLog WARN "Account not found or could not be removed."
+
+        Write-Host ''
+        Write-Host '==================================================' -ForegroundColor Cyan
+        Write-Host '              Remove Account from Pool            ' -ForegroundColor Cyan
+        Write-Host '==================================================' -ForegroundColor Cyan
+        $idx = 1
+        foreach ($acc in $poolData.accounts) {
+            Write-Host "  $idx. $($acc.label) [ID: $($acc.id)] ($($acc.status))" -ForegroundColor White
+            $idx++
+        }
+        Write-Host ''
+        Write-Host '  A. Remove ALL accounts' -ForegroundColor Red
+        Write-Host '  0. Cancel' -ForegroundColor DarkGray
+        Write-Host ''
+
+        $inputChoice = Read-Host "Select account number to remove (1-$($poolData.accounts.Count)), A for all, or 0 to cancel"
+        if ([string]::IsNullOrWhiteSpace($inputChoice) -or $inputChoice -eq '0') { return }
+
+        if ($inputChoice.Trim().ToUpperInvariant() -eq 'A') {
+            foreach ($acc in $poolData.accounts) {
+                Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/admin/api/accounts/$($acc.id)" -Method Delete -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
+            }
+            Write-TransportLog OK 'All accounts have been removed from the pool.'
+            return
+        }
+
+        $selectedNum = 0
+        $targetId = $null
+        if ([int]::TryParse($inputChoice.Trim(), [ref]$selectedNum) -and $selectedNum -ge 1 -and $selectedNum -le $poolData.accounts.Count) {
+            $targetId = $poolData.accounts[$selectedNum - 1].id
+        } else {
+            # Check if user entered raw ID directly
+            $match = @($poolData.accounts | Where-Object { $_.id -eq $inputChoice.Trim() })
+            if ($match.Count -gt 0) {
+                $targetId = $match[0].id
+            }
+        }
+
+        if (-not $targetId) {
+            Write-TransportLog WARN 'Invalid account selection.'
+            return
+        }
+
+        $delResp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/admin/api/accounts/$targetId" -Method Delete -TimeoutSec 5 -ErrorAction Stop
+        if ($delResp.ok -eq $true) {
+            Write-TransportLog OK "Account $targetId removed from pool."
+        } else {
+            Write-TransportLog WARN 'Account not found or could not be removed.'
         }
     }
     catch {
