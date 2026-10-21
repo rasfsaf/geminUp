@@ -43,6 +43,8 @@ $script:ArgonConfigPath = Join-Path $script:ArgonDir 'argon-config.json'
 $script:ArgonDbPath = Join-Path $script:ArgonDir 'gemini.db'
 $script:ArgonPidPath = Join-Path $script:ArgonDir 'argon.pid'
 $script:ArgonLogPath = Join-Path $script:ArgonDir 'argon.log'
+$script:ArgonCookieFilePath = Join-Path $script:ArgonDir 'cookie.txt'
+$script:ArgonFixedApiKey = 'sk-geminup-argon-local-access-key'
 $script:ArgonVersion = 'v4.23.0'
 $script:ArgonDownloadUri = "https://github.com/zexadev/gemini-web2api-go/releases/download/$($script:ArgonVersion)/gemini-web2api-go_$($script:ArgonVersion)_windows_amd64.exe"
 $script:ArgonSha256 = 'c26d00b3bd0d85f3808455d316423d5ace135b3e20a0106e240415c62ae877a1'
@@ -1871,6 +1873,10 @@ function Start-ArgonBridge {
         '--port', $script:ArgonListenPort
     )
 
+    if (Test-Path -LiteralPath $script:ArgonCookieFilePath) {
+        $arguments += @('--cookie-file', ('"{0}"' -f $script:ArgonCookieFilePath))
+    }
+
     if (Test-TransportListener -TimeoutMilliseconds 300) {
         $arguments += @('--proxy', ("socks5://127.0.0.1:$script:ListenPort"))
         Write-TransportLog INFO "Routing Argon bridge upstream via local geminUp SOCKS5 (127.0.0.1:$script:ListenPort)."
@@ -1987,18 +1993,66 @@ function Set-ArgonCookie {
     Write-Host '==================================================' -ForegroundColor Cyan
     Write-Host '1. In browser, log in to gemini.google.com with your Pro/paid Google account.' -ForegroundColor Yellow
     Write-Host '2. Press F12 -> Network tab -> F5 -> find any request (e.g. batchexecute).' -ForegroundColor Yellow
-    Write-Host '3. Copy Request Headers -> "Cookie" value and paste it here.' -ForegroundColor Yellow
-    Write-Host '   (Required items: __Secure-1PSID, __Secure-1PSIDTS, etc.)' -ForegroundColor DarkGray
+    Write-Host '3. Copy Request Headers -> "Cookie" (or copy via Cookie-Editor extension).' -ForegroundColor Yellow
+    Write-Host '   (Required items: SAPISID, SID, HSID, SSID, APISID, __Secure-1PSID, etc.)' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host 'How would you like to provide the cookie?' -ForegroundColor Cyan
+    Write-Host '  1. Read directly from Windows Clipboard (Recommended - avoids console length limits)'
+    Write-Host '  2. Read from file (e.g. cookie.txt)'
+    Write-Host '  3. Paste manually'
     Write-Host ''
 
-    $cookie = Read-Host 'Paste Cookie'
+    $choice = Read-Host 'Select 1-3 [Default: 1]'
+    if ([string]::IsNullOrWhiteSpace($choice)) { $choice = '1' }
+
+    $cookie = ''
+    switch ($choice) {
+        '1' {
+            try {
+                $cookie = Get-Clipboard -Raw -ErrorAction Stop
+            } catch {
+                Write-TransportLog ERROR "Cannot read clipboard: $($_.Exception.Message)"
+                return
+            }
+            if ([string]::IsNullOrWhiteSpace($cookie)) {
+                Write-TransportLog WARN 'Clipboard is empty. Copy the cookie first and try again.'
+                return
+            }
+            Write-TransportLog OK "Read $($cookie.Length) characters from clipboard."
+            break
+        }
+        '2' {
+            $filePath = Read-Host 'Enter full path to cookie file'
+            if ([string]::IsNullOrWhiteSpace($filePath) -or -not (Test-Path -LiteralPath $filePath)) {
+                Write-TransportLog WARN 'File not found. Operation cancelled.'
+                return
+            }
+            $cookie = Get-Content -LiteralPath $filePath -Raw -Encoding utf8
+            break
+        }
+        '3' {
+            $cookie = Read-Host 'Paste Cookie'
+            break
+        }
+        default {
+            Write-TransportLog WARN 'Invalid choice.'
+            return
+        }
+    }
+
     if ([string]::IsNullOrWhiteSpace($cookie)) {
-        Write-TransportLog WARN 'Cookie input was empty. Operation cancelled.'
+        Write-TransportLog WARN 'Cookie content is empty. Operation cancelled.'
         return
     }
 
-    if ($cookie -notmatch '__Secure-1PSID' -and $cookie -notmatch 'SID=') {
-        Write-TransportLog WARN 'Warning: the pasted string does not appear to contain standard Google SID cookies.'
+    # Clean up common header prefixes, whitespace, or enclosing quotes
+    $cookie = $cookie.Trim()
+    $cookie = $cookie -replace '^(?i)cookie:\s*', ''
+    $cookie = $cookie.Trim().Trim('"').Trim("'")
+
+    if ($cookie -notmatch '(?i)SAPISID') {
+        Write-TransportLog WARN 'Warning: "SAPISID" was not found in the cookie string.'
+        Write-TransportLog WARN 'Make sure you copied the full Request Header "Cookie" from gemini.google.com.'
         $proceed = Read-Host 'Proceed anyway? (y/N)'
         if ($proceed -notmatch '^(?i)y') {
             Write-TransportLog WARN 'Cancelled.'
@@ -2006,24 +2060,33 @@ function Set-ArgonCookie {
         }
     }
 
+    # Ensure bridge directory exists and save cookie file
+    Initialize-ArgonDirectory
+    [IO.File]::WriteAllText($script:ArgonCookieFilePath, $cookie, [Text.UTF8Encoding]::new($false))
+    Write-TransportLog OK "Saved cookie to local file: $script:ArgonCookieFilePath"
+
+    # Ensure bridge is running
     $status = Get-ArgonBridgeStatus
     if (-not $status.Listening) {
-        Write-TransportLog INFO 'Starting Argon bridge daemon first...'
+        Write-TransportLog INFO 'Starting Argon bridge daemon...'
         Start-ArgonBridge
     }
 
-    $body = @{
+    # Post cookie to bridge API as UTF-8 bytes to prevent encoding corruption on non-English locales
+    $bodyObj = @{
         label = 'GoogleProAccount'
-        cookie = $cookie.Trim()
+        cookie = $cookie
         note = ('Added via geminUp on ' + (Get-Date).ToString('yyyy-MM-dd HH:mm'))
-    } | ConvertTo-Json
+    }
+    $json = ConvertTo-Json -InputObject $bodyObj -Compress
+    $bytes = [Text.Encoding]::UTF8.GetBytes($json)
 
     try {
         $addResp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/admin/api/cookies" `
-            -Method Post -Body $body -ContentType 'application/json; charset=utf-8' -TimeoutSec 10 -ErrorAction Stop
+            -Method Post -Body $bytes -ContentType 'application/json' -TimeoutSec 10 -ErrorAction Stop
 
         $acctId = $addResp.id
-        Write-TransportLog OK "Account cookie saved (Account ID: $acctId)."
+        Write-TransportLog OK "Account cookie saved into bridge pool (Account ID: $acctId)."
 
         Write-TransportLog INFO 'Checking cookie health with Google servers...'
         $checkResp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/admin/api/cookies/$acctId/check" `
@@ -2038,7 +2101,18 @@ function Set-ArgonCookie {
         }
     }
     catch {
-        Write-TransportLog ERROR "Failed to configure cookie via bridge API: $($_.Exception.Message)"
+        $serverDetail = ''
+        if ($_.Exception.Response) {
+            try {
+                $sr = [IO.StreamReader]::new($_.Exception.Response.GetResponseStream(), [Text.Encoding]::UTF8)
+                $serverDetail = $sr.ReadToEnd()
+            } catch { }
+        }
+        $msg = $_.Exception.Message
+        if (-not [string]::IsNullOrWhiteSpace($serverDetail)) {
+            $msg += " | Server details: $serverDetail"
+        }
+        Write-TransportLog ERROR "Failed to configure cookie via bridge API: $msg"
     }
 }
 
@@ -2066,16 +2140,18 @@ function Test-ArgonPipeline {
         }
 
         Write-TransportLog INFO 'Sending test prompt to gemini-4-argon...'
-        $payload = @{
+        $payloadObj = @{
             model = 'gemini-4-argon'
             messages = @(
                 @{ role = 'user'; content = 'Respond with the single word: OK' }
             )
             max_tokens = 10
-        } | ConvertTo-Json
+        }
+        $payloadJson = ConvertTo-Json -InputObject $payloadObj -Compress
+        $payloadBytes = [Text.Encoding]::UTF8.GetBytes($payloadJson)
 
         $chatResp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/v1/chat/completions" `
-            -Method Post -Body $payload -ContentType 'application/json; charset=utf-8' -TimeoutSec 20 -ErrorAction Stop
+            -Method Post -Body $payloadBytes -ContentType 'application/json' -TimeoutSec 25 -ErrorAction Stop
 
         $reply = ''
         $actualModel = ''
@@ -2100,7 +2176,18 @@ function Test-ArgonPipeline {
         }
     }
     catch {
-        Write-TransportLog ERROR "Test failed: $($_.Exception.Message)"
+        $serverDetail = ''
+        if ($_.Exception.Response) {
+            try {
+                $sr = [IO.StreamReader]::new($_.Exception.Response.GetResponseStream(), [Text.Encoding]::UTF8)
+                $serverDetail = $sr.ReadToEnd()
+            } catch { }
+        }
+        $msg = $_.Exception.Message
+        if (-not [string]::IsNullOrWhiteSpace($serverDetail)) {
+            $msg += " | Server details: $serverDetail"
+        }
+        Write-TransportLog ERROR "Test failed: $msg"
     }
 }
 
