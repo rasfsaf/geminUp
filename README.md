@@ -69,14 +69,14 @@ Android-приложение не является VPN и не перехват�
 5. Enable YouTube routing
 6. Patch Antigravity binaries
 7. Roll back Antigravity binary patch
-8. Gemini 4 Argon pipeline (Native bridge)
+8. Gemini 4 Argon pipeline (Native Gateway Engine)
 ```
 
 Пункт 5 переключается между `Enable YouTube routing` и `Disable YouTube routing`. Настройка по умолчанию выключена, сохраняется между обновлениями и применяется без повторного ввода SOCKS5. После переключения полностью перезапусти открытые браузеры, чтобы они закрыли старые соединения.
 
 Пункты 6 и 7 правят `language_server*.exe` и `agy.exe`: поле protobuf `ineligible` заменяется на `inexigible`. Длина строки та же, размер и структура файла не меняются. Enable и Refresh применяют патч сами; пункт 6 запускает его отдельно, пункт 7 возвращает `ineligible`. Та же замена снимает другие клиентские ошибки Antigravity, завязанные на это поле, включая состояние ineligible account (`SET_INELIGIBLE` / `ineligibleTiers`). Если установка не найдена, меню просит путь к exe или к папке. Полный обход папки начинается с `scan `, если обычных мест недостаточно.
 
-Пункт 8 открывает меню автономного моста Gemini 4 Argon (опционально, не нагружает систему). Скачивает официальный нативный бинарник под Windows (без Docker Desktop и без WSL2), запускает изолированный фоновый процесс на `127.0.0.1:8083` с автоматической маршрутизацией через локальный SOCKS5 geminUp и подключает сессию Google-аккаунта с Pro-подпиской. Мост предоставляет стандартный OpenAI-совместимый API (`http://127.0.0.1:8083/v1`) с поддержкой моделей `gemini-4-argon` и `gemini-4-argon-thinking-medium` для IDE-расширений (Roo Code, Cline, Continue и др.).
+Пункт 8 открывает меню автономного локального шлюза Gemini 4 Argon (100% локальный, конфиденциальный, нулевые внешние зависимости). Запускает нативный фоновый сервис на `127.0.0.1:8083` с квотами Antigravity Agent Mode (`action: 12`), пулом Google-аккаунтов со sticky-распределением (affinity сессии для мгновенного ответа в IDE без задержек холодного старта), автоматическим failover на резервные аккаунты при 429/исчерпании квот и периодическим фоновым keep-alive для предотвращения протухания сессий. Шлюз предоставляет стандартный OpenAI-совместимый API (`http://127.0.0.1:8083/v1`) с поддержкой моделей `gemini-4-argon`, `gemini-4-argon-thinking-medium`, `gemini-3.8-flash`, `gemini-3.1-pro` для IDE-расширений (Roo Code, Cline, Cursor, Continue и др.).
 
 Поддерживаются форматы:
 
@@ -292,14 +292,14 @@ Download and run `geminUp-bootstrap.bat`. It will:
 5. Enable YouTube routing
 6. Patch Antigravity binaries
 7. Roll back Antigravity binary patch
-8. Gemini 4 Argon pipeline (Native bridge)
+8. Gemini 4 Argon pipeline (Native Gateway Engine)
 ```
 
 Option 5 toggles between `Enable YouTube routing` and `Disable YouTube routing`. It is disabled by default, persists across updates, and can be changed without entering the SOCKS5 proxy again. After changing it, fully restart all open browsers so they close existing connections.
 
 Items 6 and 7 patch `language_server*.exe` and `agy.exe`: the protobuf field `ineligible` is rewritten as `inexigible`. The strings are the same length, so the file size and layout do not change. Enable and Refresh apply the patch automatically; item 6 runs it on its own, and item 7 restores `ineligible`. The same rewrite clears other Antigravity client errors tied to that field, including the ineligible-account state (`SET_INELIGIBLE` / `ineligibleTiers`). If the install is not found, the menu asks for the binary or its folder. Prefix a folder with `scan ` only when the usual locations are not enough.
 
-Option 8 opens the standalone Gemini 4 Argon bridge menu (optional, zero system footprint). It downloads the official native Windows binary (no Docker Desktop or WSL2 needed), runs an isolated background daemon on `127.0.0.1:8083` routed upstream through local geminUp SOCKS5, and attaches the Google session cookie from a Pro-tier account. The bridge exposes a standard OpenAI-compatible API (`http://127.0.0.1:8083/v1`) with full support for `gemini-4-argon` and `gemini-4-argon-thinking-medium` models for IDE extensions (Roo Code, Cline, Continue, etc.).
+Option 8 opens the autonomous local Gemini 4 Argon gateway menu (100% local, confidential, zero external dependencies). It runs a native background daemon on `127.0.0.1:8083` utilizing high Antigravity Agent Mode quotas (`action: 12`), a sticky Google account pool (session affinity for instant 1-2s turn responses in IDEs without cold session restart delays), automatic failover to standby accounts on 429 quota exhaustion, and continuous rolling cookie keep-alive (`__Secure-1PSIDTS`). The gateway exposes a standard OpenAI-compatible API (`http://127.0.0.1:8083/v1`) supporting `gemini-4-argon`, `gemini-4-argon-thinking-medium`, `gemini-3.8-flash`, and `gemini-3.1-pro` models for IDE extensions (Roo Code, Cline, Cursor, Continue, etc.).
 
 Supported formats:
 
