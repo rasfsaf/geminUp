@@ -1061,8 +1061,8 @@ function Invoke-AntigravityAsarPatch {
     }
 
     $s1 = "            '--cloud_code_endpoint',`n            'https://daily-cloudcode-pa.googleapis.com',`n            '--enable_sidecars',`n        ];`n        // Point the LS at the main process' host bridge server."
-    $s2 = "            '--cloud_code_endpoint',`n            process.env.ARGON_ENDPOINT||'https://daily-cloudcode-pa.googleapis.com',`n            '--enable_sidecars',`n        ];`n        /* geminUp */"
-    $s2Padded = $s2.PadRight($s1.Length, ' ')
+    $s2Prefix = "            '--cloud_code_endpoint',`n            process.env.ARGON_ENDPOINT||'https://daily-cloudcode-pa.googleapis.com',`n            '--enable_sidecars',`n        ];`n        // geminUp: "
+    $s2Padded = $s2Prefix.PadRight($s1.Length, ' ')
 
     $from = if ($Direction -eq 'Apply') { $s1 } else { $s2Padded }
     $to = if ($Direction -eq 'Apply') { $s2Padded } else { $s1 }
@@ -2081,7 +2081,7 @@ function Add-ArgonAccount {
     Write-Host ''
     Write-Host 'How would you like to provide the cookie?' -ForegroundColor Cyan
     Write-Host '  1. Read directly from Windows Clipboard (Recommended - avoids console buffer limits)'
-    Write-Host '  2. Read from file (e.g. cookie.txt or storage.json)'
+    Write-Host '  2. Read from file (cookie.txt, cookies.txt Netscape format, or storage.json)'
     Write-Host '  3. Paste manually'
     Write-Host ''
 

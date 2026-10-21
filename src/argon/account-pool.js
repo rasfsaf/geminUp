@@ -89,12 +89,38 @@ class AccountPool {
       rawStr = rawStr.replace(/^\uFEFF/, '').trim();
       rawStr = rawStr.replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/, '');
       rawStr = rawStr.replace(/^cookie:\s*/i, '').trim();
-      if (rawStr.startsWith('{') || rawStr.startsWith('[')) {
+
+      // Check if input is a Netscape / curl format cookie file (tab-separated lines)
+      if (rawStr.includes('# Netscape HTTP Cookie File') || (rawStr.includes('\t') && rawStr.split('\n').some(l => l.split('\t').length >= 7))) {
+        const lines = rawStr.split(/\r?\n/);
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('#')) continue;
+          const parts = line.split('\t');
+          if (parts.length >= 7) {
+            const domain = parts[0].trim();
+            const pathVal = parts[2].trim() || '/';
+            const expires = parseInt(parts[4].trim(), 10) || -1;
+            const name = parts[5].trim();
+            const value = parts.slice(6).join('\t').trim();
+            if (name && value) {
+              cookies.push({
+                name,
+                value,
+                domain: domain || '.google.com',
+                path: pathVal,
+                expires,
+              });
+            }
+          }
+        }
+      } else if (rawStr.startsWith('{') || rawStr.startsWith('[')) {
         try {
           obj = JSON.parse(rawStr);
         } catch { }
       }
-      if (!obj) {
+
+      if (!obj && cookies.length === 0) {
         // Parse key=value; key2=value2
         const pairs = rawStr.split(';');
         for (const pair of pairs) {
