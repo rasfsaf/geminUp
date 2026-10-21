@@ -259,6 +259,104 @@ function formatFunctionResponse(fr) {
   return `[Tool Result: ${name}]\n${JSON.stringify(resp, null, 2)}`;
 }
 
+const PZ_SCREENSHOTS_DIR = 'C:\\Program Files (x86)\\Steam\\userdata\\1651894560\\760\\remote\\108600\\screenshots';
+
+function getLatestGameScreenshot() {
+  try {
+    if (!fs.existsSync(PZ_SCREENSHOTS_DIR)) return null;
+    const files = fs.readdirSync(PZ_SCREENSHOTS_DIR)
+      .filter((f) => f.endsWith('.jpg') || f.endsWith('.png'))
+      .map((f) => {
+        const full = path.join(PZ_SCREENSHOTS_DIR, f);
+        return { name: f, full, mtime: fs.statSync(full).mtimeMs };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+
+    return files.length > 0 ? files[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatInlineData(inlineData) {
+  if (!inlineData || !inlineData.data) return '[Attached Data: Empty]';
+  const mimeType = inlineData.mimeType || 'image/png';
+  const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg'
+    : mimeType.includes('webp') ? 'webp'
+    : mimeType.includes('gif') ? 'gif'
+    : 'png';
+
+  const downloadDir = 'C:\\Users\\0SLEK\\Downloads';
+  const fileName = `antigravity_attached_${Date.now()}_${crypto.randomBytes(3).toString('hex')}.${ext}`;
+  const filePath = path.join(downloadDir, fileName);
+
+  try {
+    if (!fs.existsSync(downloadDir)) {
+      fs.mkdirSync(downloadDir, { recursive: true });
+    }
+    const buf = Buffer.from(inlineData.data, 'base64');
+    fs.writeFileSync(filePath, buf);
+    const posixPath = filePath.replace(/\\/g, '/');
+    return `[USER ATTACHED IMAGE]
+Format: ${mimeType}
+Saved locally to: ${posixPath}
+File size: ${Math.round(buf.length / 1024)} KB
+Instruction: The user has attached an image or screenshot saved at '${posixPath}'. You have workspace tools enabled. You can use 'read_file' or commands to inspect it, or refer to this image file in your response.
+[/USER ATTACHED IMAGE]`;
+  } catch (err) {
+    return `[Attached Image: ${mimeType} (base64 length: ${inlineData.data.length} chars)]`;
+  }
+}
+
+function optimizeConversationTurns(turnsList, maxTurnToolResultChars = 1500, keepFullRecentTurns = 3) {
+  if (!Array.isArray(turnsList) || turnsList.length === 0) return [];
+  const totalTurns = turnsList.length;
+
+  return turnsList.map((turn, index) => {
+    const isRecent = index >= totalTurns - keepFullRecentTurns;
+    if (isRecent || !turn || !Array.isArray(turn.parts)) return turn;
+
+    const condensedParts = turn.parts.map((part) => {
+      if (part && part.functionResponse) {
+        const fr = part.functionResponse;
+        const resp = fr.response;
+        if (resp && typeof resp.output === 'string' && resp.output.length > maxTurnToolResultChars) {
+          const head = resp.output.slice(0, 600);
+          const tail = resp.output.slice(-400);
+          const omitted = resp.output.length - 1000;
+          return {
+            ...part,
+            functionResponse: {
+              ...fr,
+              response: {
+                ...resp,
+                output: `${head}\n\n[... Older tool output truncated: ${omitted} characters omitted for context efficiency ...]\n\n${tail}`,
+              },
+            },
+          };
+        }
+      }
+      return part;
+    });
+
+    return { ...turn, parts: condensedParts };
+  });
+}
+
+function payloadHasImages(bodyJson) {
+  if (!bodyJson || typeof bodyJson !== 'object') return false;
+  const req = bodyJson.request || bodyJson;
+  const contents = req.contents || bodyJson.contents;
+  if (!Array.isArray(contents)) return false;
+  for (const c of contents) {
+    if (!c || !Array.isArray(c.parts)) continue;
+    for (const p of c.parts) {
+      if (p && (p.inlineData || p.fileData)) return true;
+    }
+  }
+  return false;
+}
+
 function extractToolCallsFromOutput(text) {
   if (!text || typeof text !== 'string') return { toolCalls: [], cleanText: text || '' };
 
@@ -347,13 +445,14 @@ function formatCloudCodeContentsToPrompt(contents, systemInstruction) {
     if (sysTexts.length) parts.push(`[SYSTEM INSTRUCTION]\n${sysTexts.join('\n')}`);
   }
   if (Array.isArray(contents)) {
-    for (const turn of contents) {
+    const optimized = optimizeConversationTurns(contents, 1500, 3);
+    for (const turn of optimized) {
       const role = String(turn.role || 'user').toUpperCase();
       const textParts = [];
       for (const p of turn.parts || []) {
         if (typeof p === 'string') textParts.push(p);
         else if (p && p.text) textParts.push(p.text);
-        else if (p && p.inlineData) textParts.push(`[Attached Data: ${p.inlineData.mimeType || 'binary'}]`);
+        else if (p && p.inlineData) textParts.push(formatInlineData(p.inlineData));
         else if (p && p.functionCall) textParts.push(formatFunctionCall(p.functionCall));
         else if (p && p.functionResponse) textParts.push(formatFunctionResponse(p.functionResponse));
       }
@@ -395,8 +494,9 @@ function extractPromptFromAnyPayload(bodyJson) {
     }
   }
 
-  // Extract Contents / Turns
-  const turnsList = Array.isArray(contents) ? contents : (contents && typeof contents === 'object' ? [contents] : (Array.isArray(turns) ? turns : null));
+  // Extract Contents / Turns with sliding window context optimization
+  const rawTurnsList = Array.isArray(contents) ? contents : (contents && typeof contents === 'object' ? [contents] : (Array.isArray(turns) ? turns : null));
+  const turnsList = optimizeConversationTurns(rawTurnsList, 1500, 3);
   if (turnsList) {
     for (const turn of turnsList) {
       if (!turn) continue;
@@ -415,7 +515,7 @@ function extractPromptFromAnyPayload(bodyJson) {
           if (typeof p === 'string') textParts.push(p);
           else if (p.text) textParts.push(p.text);
           else if (p.content) textParts.push(typeof p.content === 'string' ? p.content : JSON.stringify(p.content));
-          else if (p.inlineData) textParts.push(`[Attached Data: ${p.inlineData.mimeType || 'binary'}]`);
+          else if (p.inlineData) textParts.push(formatInlineData(p.inlineData));
           else if (p.functionCall) textParts.push(formatFunctionCall(p.functionCall));
           else if (p.functionResponse) textParts.push(formatFunctionResponse(p.functionResponse));
         }
@@ -449,6 +549,15 @@ function extractPromptFromAnyPayload(bodyJson) {
   const directPrompt = req.prompt || bodyJson.prompt || req.query || bodyJson.query || req.input || bodyJson.input;
   if (typeof directPrompt === 'string' && directPrompt.trim()) {
     parts.push(directPrompt.trim());
+  }
+
+  // Visual inspection / game screenshots detection helper
+  const promptCheck = parts.join(' ').toLowerCase();
+  if (promptCheck.includes('скриншот') || promptCheck.includes('screenshot') || promptCheck.includes('zomboid')) {
+    const latestShot = getLatestGameScreenshot();
+    if (latestShot) {
+      parts.push(`[GAME SCREENSHOTS CONTEXT]\nLatest Game Screenshot available at: ${latestShot.full.replace(/\\/g, '/')}\nTimestamp: ${new Date(latestShot.mtime).toISOString()}\nYou can use workspace tools to inspect or analyze this screenshot if requested.\n[/GAME SCREENSHOTS CONTEXT]`);
+    }
   }
 
   if (parts.length > 0) {
@@ -774,11 +883,12 @@ function getRedirectConfig() {
       return {
         enabled: data.redirectSonnetToArgon !== false,
         redirectFlashToPool: Boolean(data.redirectFlashToPool),
+        passVisionToCloudCode: Boolean(data.passVisionToCloudCode),
         failClosed: data.failClosed !== false,
       };
     }
   } catch { }
-  return { enabled: true, redirectFlashToPool: false, failClosed: true };
+  return { enabled: true, redirectFlashToPool: false, passVisionToCloudCode: false, failClosed: true };
 }
 
 // Transparent upstream proxy to real Google Cloud Code endpoint for metadata & handshake
@@ -950,6 +1060,13 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
   // If redirect is disabled or this model is not targeted for pool routing, pass through to Google Cloud Code
   if (!isTargeted) {
+    return await forwardToGoogleCloudCode(req, res, rawBuf);
+  }
+
+  // Vision Media Routing: If image attachments are present and native multimodal mode is requested, forward directly to Cloud Code
+  const hasImages = payloadHasImages(bodyJson);
+  if (hasImages && redirectConfig.passVisionToCloudCode) {
+    console.info('[Argon Gateway] Image attachment detected with passVisionToCloudCode enabled -> Forwarding to native Cloud Code Multimodal engine.');
     return await forwardToGoogleCloudCode(req, res, rawBuf);
   }
 

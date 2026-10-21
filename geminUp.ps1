@@ -1120,13 +1120,28 @@ function Get-FlashRedirectState {
     return $false
 }
 
+function Get-VisionRedirectState {
+    $cfgFile = Join-Path $script:ArgonDir 'redirect-config.json'
+    if (Test-Path -LiteralPath $cfgFile) {
+        try {
+            $data = Get-Content -LiteralPath $cfgFile -Raw -Encoding utf8 | ConvertFrom-Json
+            if ($data.PSObject.Properties.Name -contains 'passVisionToCloudCode') {
+                return [bool]$data.passVisionToCloudCode
+            }
+        } catch { }
+    }
+    return $false
+}
+
 function Set-SonnetRedirectState {
     param([bool]$Enabled)
     $cfgFile = Join-Path $script:ArgonDir 'redirect-config.json'
     $currentFlash = Get-FlashRedirectState
+    $currentVision = Get-VisionRedirectState
     $obj = @{
         redirectSonnetToArgon = $Enabled
         redirectFlashToPool = $currentFlash
+        passVisionToCloudCode = $currentVision
         targetModel = 'claude-sonnet-4-6'
         failClosed = $true
         updatedAt = (Get-Date).ToString('o')
@@ -1140,9 +1155,11 @@ function Set-FlashRedirectState {
     param([bool]$Enabled)
     $cfgFile = Join-Path $script:ArgonDir 'redirect-config.json'
     $currentSonnet = Get-SonnetRedirectState
+    $currentVision = Get-VisionRedirectState
     $obj = @{
         redirectSonnetToArgon = $currentSonnet
         redirectFlashToPool = $Enabled
+        passVisionToCloudCode = $currentVision
         targetModel = 'claude-sonnet-4-6'
         failClosed = $true
         updatedAt = (Get-Date).ToString('o')
@@ -1150,6 +1167,39 @@ function Set-FlashRedirectState {
     $json = ConvertTo-Json -InputObject $obj -Compress
     [System.IO.File]::WriteAllText($cfgFile, $json, [System.Text.Encoding]::UTF8)
     return $Enabled
+}
+
+function Set-VisionRedirectState {
+    param([bool]$Enabled)
+    $cfgFile = Join-Path $script:ArgonDir 'redirect-config.json'
+    $currentSonnet = Get-SonnetRedirectState
+    $currentFlash = Get-FlashRedirectState
+    $obj = @{
+        redirectSonnetToArgon = $currentSonnet
+        redirectFlashToPool = $currentFlash
+        passVisionToCloudCode = $Enabled
+        targetModel = 'claude-sonnet-4-6'
+        failClosed = $true
+        updatedAt = (Get-Date).ToString('o')
+    }
+    $json = ConvertTo-Json -InputObject $obj -Compress
+    [System.IO.File]::WriteAllText($cfgFile, $json, [System.Text.Encoding]::UTF8)
+    return $Enabled
+}
+
+function Switch-AntigravityVisionRouting {
+    $current = Get-VisionRedirectState
+    $newState = -not $current
+    Set-VisionRedirectState -Enabled $newState | Out-Null
+    Write-Host ''
+    if ($newState) {
+        Write-TransportLog OK 'Vision Mode: DIRECT CLOUD CODE MULTIMODAL.'
+        Write-Host '  Requests with attached images are routed directly to Google Cloud Code for native pixel-level vision.' -ForegroundColor Green
+    } else {
+        Write-TransportLog OK 'Vision Mode: LOCAL DISK BRIDGE (C:\Users\0SLEK\Downloads).'
+        Write-Host '  Attached images are automatically saved to Downloads and injected with file paths for workspace tool inspection.' -ForegroundColor White
+    }
+    Write-Host ''
 }
 
 function Switch-AntigravityFlashRouting {
@@ -2705,6 +2755,10 @@ function Show-ArgonMenu {
         $flashRouting = if ($flashRedirect) { 'ALL FLASH -> ULTRA-QUOTA POOL (7 Accounts)' } else { 'DIRECT CLOUD CODE (Dedicated model available)' }
         $flashColor = if ($flashRedirect) { 'Green' } else { 'Cyan' }
 
+        $visionRedirect = Get-VisionRedirectState
+        $visionRouting = if ($visionRedirect) { 'DIRECT CLOUD CODE MULTIMODAL' } else { 'LOCAL DISK BRIDGE (Auto-save to Downloads)' }
+        $visionColor = if ($visionRedirect) { 'Green' } else { 'Yellow' }
+
         Write-Host '==================================================' -ForegroundColor Cyan
         Write-Host '  Gemini 4 Argon Pipeline (Native Gateway Engine)' -ForegroundColor Cyan
         Write-Host '  Developer Blog: https://t.me/iqsklad20          ' -ForegroundColor Magenta
@@ -2715,6 +2769,8 @@ function Show-ArgonMenu {
         Write-Host $sonnetRouting -ForegroundColor $routingColor
         Write-Host -NoNewline '  Flash Ultra-Quota:    '
         Write-Host $flashRouting -ForegroundColor $flashColor
+        Write-Host -NoNewline '  Vision Media Mode:    '
+        Write-Host $visionRouting -ForegroundColor $visionColor
         Write-Host -NoNewline '  Account Pool:         '
         Write-Host $acctLabel -ForegroundColor $acctColor
         Write-Host "  Auto Health Keeper:   24h Idle Ping (5m Cooldown, Windows Uptime Tracked)" -ForegroundColor DarkCyan
@@ -2731,10 +2787,11 @@ function Show-ArgonMenu {
         Write-Host '  8. Stop Argon Gateway'
         Write-Host '  9. Connection Instructions for IDE'
         Write-Host '  10. Toggle Global Flash -> Ultra-Quota Pool'
+        Write-Host '  11. Toggle Vision Media Mode (Local Disk Bridge vs Direct Cloud Code)'
         Write-Host '  0. Return to main menu'
         Write-Host ''
 
-        $sub = Read-Host 'Select 0-10'
+        $sub = Read-Host 'Select 0-11'
         try {
             switch ($sub) {
                 '1' { Start-ArgonBridge; Start-Sleep -Seconds 2; break }
@@ -2747,8 +2804,9 @@ function Show-ArgonMenu {
                 '8' { Stop-ArgonBridge; Start-Sleep -Seconds 1; break }
                 '9' { Show-ArgonConnectionInfo; Read-Host 'Press Enter to continue'; break }
                 '10' { Switch-AntigravityFlashRouting; Start-Sleep -Seconds 2; break }
+                '11' { Switch-AntigravityVisionRouting; Start-Sleep -Seconds 2; break }
                 '0' { return }
-                default { Write-TransportLog WARN 'Enter 0 through 10.'; Start-Sleep -Seconds 2; continue }
+                default { Write-TransportLog WARN 'Enter 0 through 11.'; Start-Sleep -Seconds 2; continue }
             }
         }
         catch {
