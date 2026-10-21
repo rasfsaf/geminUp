@@ -2093,12 +2093,26 @@ function Add-ArgonAccount {
             break
         }
         '2' {
-            $filePath = Read-Host 'Enter full path to cookie / storage file'
-            if ([string]::IsNullOrWhiteSpace($filePath) -or -not (Test-Path -LiteralPath $filePath)) {
-                Write-TransportLog WARN 'File not found. Operation cancelled.'
+            $inputPath = Read-Host 'Enter full path to cookie / storage file'
+            if ([string]::IsNullOrWhiteSpace($inputPath)) {
+                Write-TransportLog WARN 'No path entered. Operation cancelled.'
                 return
             }
-            $cookie = Get-Content -LiteralPath $filePath -Raw -Encoding utf8
+            $cleanPath = $inputPath.Trim().Trim([char]34).Trim([char]39).Trim()
+            if (-not (Test-Path -LiteralPath $cleanPath)) {
+                Write-TransportLog WARN "File not found: $cleanPath"
+                return
+            }
+            if (-not (Test-Path -LiteralPath $cleanPath -PathType Leaf)) {
+                Write-TransportLog WARN "Path is a directory, not a file! Please specify the file itself (e.g. $cleanPath\cookies.txt)."
+                return
+            }
+            try {
+                $cookie = [System.IO.File]::ReadAllText($cleanPath, [System.Text.Encoding]::UTF8)
+            } catch {
+                Write-TransportLog ERROR "Cannot read file: $($_.Exception.Message)"
+                return
+            }
             break
         }
         '3' {
