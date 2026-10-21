@@ -1948,26 +1948,35 @@ function Start-ArgonBridge {
 
     Stop-ArgonBridge -Silent
 
-    $fullCmd = "`"$nodeExe`" --max-http-header-size=131072 `"$script:ArgonGatewayScript`" --port $script:ArgonListenPort --host 127.0.0.1 --accounts `"$script:ArgonAccountsPath`""
+    $taskArguments = ('"{0}" --port {1} --host 127.0.0.1 --accounts "{2}"' -f $script:ArgonGatewayScript, $script:ArgonListenPort, $script:ArgonAccountsPath)
     if (Test-TransportListener -TimeoutMilliseconds 300) {
-        $fullCmd += " --proxy socks5://127.0.0.1:$script:ListenPort"
+        $taskArguments += " --proxy socks5://127.0.0.1:$script:ListenPort"
         Write-TransportLog INFO "Routing Argon Gateway upstream via local geminUp SOCKS5 (127.0.0.1:$script:ListenPort)."
     }
     else {
         Write-TransportLog INFO 'geminUp SOCKS5 is not running; Argon Gateway will connect directly.'
     }
 
-    $res = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-        CommandLine = $fullCmd
-        CurrentDirectory = $script:ArgonDir
-    }
+    try {
+        $taskAction = New-ScheduledTaskAction -Execute $nodeExe -Argument $taskArguments -WorkingDirectory $script:ArgonDir
+        $triggers = @(
+            New-ScheduledTaskTrigger -AtStartup
+            New-ScheduledTaskTrigger -AtLogOn
+        )
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+            -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
+            -MultipleInstances IgnoreNew -StartWhenAvailable
+        Register-ScheduledTask -TaskName $script:ArgonTaskName -Action $taskAction -Trigger $triggers `
+            -Principal $principal -Settings $settings -Description 'geminUp native Gemini 4 Argon Gateway daemon.' `
+            -Force | Out-Null
 
-    if ($null -eq $res -or $res.ReturnValue -ne 0 -or [int]$res.ProcessId -le 0) {
-        throw "Failed to create Argon Gateway process (Error code: $($res.ReturnValue))."
+        # Launch immediately as completely hidden background SYSTEM service (Session 0)
+        Start-ScheduledTask -TaskName $script:ArgonTaskName
     }
-
-    $procId = [int]$res.ProcessId
-    [IO.File]::WriteAllText($script:ArgonPidPath, $procId.ToString(), [Text.UTF8Encoding]::new($false))
+    catch {
+        Write-TransportLog WARN "Could not register or start scheduled task: $($_.Exception.Message)"
+    }
 
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     $ready = $false
@@ -1981,32 +1990,11 @@ function Start-ArgonBridge {
 
     if (-not $ready) {
         Stop-ArgonBridge -Silent
-        throw "Argon Gateway started (PID: $procId), but listener did not respond on port $script:ArgonListenPort within 10 seconds."
+        throw "Argon Gateway service started, but listener did not respond on port $script:ArgonListenPort within 10 seconds."
     }
 
-    try {
-        $taskArguments = ('"{0}" --port {1} --host 127.0.0.1 --accounts "{2}"' -f $script:ArgonGatewayScript, $script:ArgonListenPort, $script:ArgonAccountsPath)
-        if (Test-TransportListener -TimeoutMilliseconds 300) {
-            $taskArguments += " --proxy socks5://127.0.0.1:$script:ListenPort"
-        }
-        $taskAction = New-ScheduledTaskAction -Execute $nodeExe -Argument $taskArguments -WorkingDirectory $script:ArgonDir
-        $triggers = @(
-            New-ScheduledTaskTrigger -AtStartup
-            New-ScheduledTaskTrigger -AtLogOn
-        )
-        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-            -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
-            -MultipleInstances IgnoreNew -StartWhenAvailable
-        Register-ScheduledTask -TaskName $script:ArgonTaskName -Action $taskAction -Trigger $triggers `
-            -Principal $principal -Settings $settings -Description 'geminUp native Gemini 4 Argon Gateway daemon.' `
-            -Force | Out-Null
-    }
-    catch {
-        Write-TransportLog WARN "Could not register scheduled task: $($_.Exception.Message)"
-    }
-
-    Write-TransportLog OK "Argon Gateway started successfully on http://127.0.0.1:$($script:ArgonListenPort)/v1 (PID: $procId)."
+    $status = Get-ArgonBridgeStatus
+    Write-TransportLog OK "Argon Gateway started successfully as background service on http://127.0.0.1:$($script:ArgonListenPort)/v1 (PID: $($status.Pid))."
 }
 
 function Stop-ArgonBridge {
