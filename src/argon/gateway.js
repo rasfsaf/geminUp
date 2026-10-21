@@ -570,6 +570,14 @@ async function forwardToGoogleCloudCode(req, res, reqBuffer) {
       upstreamRes.on('end', resolve);
     });
 
+    upstreamReq.on('timeout', () => {
+      upstreamReq.destroy();
+    });
+
+    req.on('close', () => {
+      upstreamReq.destroy();
+    });
+
     upstreamReq.on('error', (err) => {
       console.error(`[Argon Gateway] Upstream Cloud Code proxy error: ${err.message}`);
       if (!res.headersSent) {
@@ -591,6 +599,7 @@ async function forwardAvailableModels(req, res, reqBuffer) {
     const upstreamUrl = new URL(req.url, 'https://daily-cloudcode-pa.googleapis.com');
     const headers = { ...req.headers };
     delete headers.host;
+    delete headers['accept-encoding'];
     headers['host'] = 'daily-cloudcode-pa.googleapis.com';
     if (reqBuffer && reqBuffer.length > 0) {
       headers['content-length'] = String(reqBuffer.length);
@@ -647,6 +656,14 @@ async function forwardAvailableModels(req, res, reqBuffer) {
         res.end(fullBuf);
         resolve();
       });
+    });
+
+    upstreamReq.on('timeout', () => {
+      upstreamReq.destroy();
+    });
+
+    req.on('close', () => {
+      upstreamReq.destroy();
     });
 
     upstreamReq.on('error', (err) => {
