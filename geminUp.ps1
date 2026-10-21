@@ -1156,9 +1156,11 @@ function Switch-AntigravityArgonRouting {
         }
 
         Write-Host ''
-        Write-TransportLog OK 'Antigravity Ultra-Quota Route: ENABLED (Fail-Closed mode).'
-        Write-Host '  Traffic for Claude Sonnet 4.6, Gemini 4 Argon, and Gemini 3.8 Flash' -ForegroundColor Green
-        Write-Host '  is routed through your rotating account pool with Fail-Closed protection.' -ForegroundColor Green
+        Write-TransportLog OK 'Claude Sonnet 4.6 -> Gemini 4 Argon Redirection: ENABLED (Fail-Closed mode).'
+        Write-Host '  When Claude Sonnet 4.6 is selected in Antigravity, requests are transparently' -ForegroundColor Green
+        Write-Host '  redirected to Gemini 4 Argon with Agent Mode quota (action: 12).' -ForegroundColor Green
+        Write-Host '  Gemini 3.8 Flash requests are also powered by the rotating account pool.' -ForegroundColor Green
+        Write-Host '  If accounts pool is exhausted, requests fail-closed without hitting Google Cloud.' -ForegroundColor Yellow
         Write-Host '  Restart Antigravity IDE if model status does not update immediately.' -ForegroundColor Yellow
     } else {
         # 1. Remove environment variables
@@ -1172,8 +1174,8 @@ function Switch-AntigravityArgonRouting {
         }
 
         Write-Host ''
-        Write-TransportLog OK 'Antigravity Ultra-Quota Route: DISABLED.'
-        Write-Host '  Traffic will connect directly to Google Cloud backend.' -ForegroundColor White
+        Write-TransportLog OK 'Claude Sonnet 4.6 -> Gemini 4 Argon Redirection: DISABLED.'
+        Write-Host '  Claude Sonnet and Gemini requests will go directly to Google Cloud backend.' -ForegroundColor White
         Write-Host '  Restart Antigravity IDE to complete the switch.' -ForegroundColor Yellow
     }
     Write-Host ''
@@ -2600,7 +2602,7 @@ function Show-ArgonMenu {
         $sonnetRedirect = Get-SonnetRedirectState
         $routingEnv = [Environment]::GetEnvironmentVariable('ARGON_ENDPOINT', 'User')
         $isRouted = $sonnetRedirect -or (-not [string]::IsNullOrWhiteSpace($routingEnv))
-        $antigravityRouting = if ($isRouted) { 'ENABLED (Ultra-Quota Pool [Fail-Closed])' } else { 'DISABLED (Direct Google Cloud)' }
+        $sonnetRouting = if ($isRouted) { 'ENABLED (Claude Sonnet 4.6 -> Gemini 4 Argon [Fail-Closed])' } else { 'DISABLED (Direct Google Cloud)' }
         $routingColor = if ($isRouted) { 'Green' } else { 'DarkGray' }
 
         Write-Host '==================================================' -ForegroundColor Cyan
@@ -2609,10 +2611,10 @@ function Show-ArgonMenu {
         Write-Host '==================================================' -ForegroundColor Cyan
         Write-Host -NoNewline '  Gateway Status:       '
         Write-Host $statusLabel -ForegroundColor $statusColor
+        Write-Host -NoNewline '  Sonnet 4.6 -> Argon:  '
+        Write-Host $sonnetRouting -ForegroundColor $routingColor
         Write-Host -NoNewline '  Account Pool:         '
         Write-Host $acctLabel -ForegroundColor $acctColor
-        Write-Host -NoNewline '  Ultra-Quota Route:    '
-        Write-Host $antigravityRouting -ForegroundColor $routingColor
         Write-Host "  Auto Health Keeper:   24h Idle Ping (5m Cooldown, Windows Uptime Tracked)" -ForegroundColor DarkCyan
         Write-Host "  Upstream:             $transportRoute" -ForegroundColor White
         Write-Host "  Local URL:            http://127.0.0.1:$($script:ArgonListenPort)/v1" -ForegroundColor DarkGray
@@ -2623,7 +2625,7 @@ function Show-ArgonMenu {
         Write-Host '  4. Remove Account from Pool'
         Write-Host '  5. Force Session Keep-Alive & Quota Refresh'
         Write-Host '  6. Test Argon Model Status & Latency'
-        Write-Host '  7. Toggle Antigravity Route (Ultra-Quota Interception)'
+        Write-Host '  7. Toggle Claude Sonnet 4.6 -> Gemini 4 Argon Redirection'
         Write-Host '  8. Stop Argon Gateway'
         Write-Host '  9. Connection Instructions for IDE'
         Write-Host '  0. Return to main menu'

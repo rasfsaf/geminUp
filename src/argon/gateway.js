@@ -197,6 +197,109 @@ function formatCloudCodeContentsToPrompt(contents, systemInstruction) {
   return parts.join('\n\n');
 }
 
+function extractPromptFromAnyPayload(bodyJson) {
+  if (!bodyJson) return '';
+  if (typeof bodyJson === 'string') return bodyJson;
+
+  const req = bodyJson.request || bodyJson;
+  const sysInst = req.systemInstruction || req.system_instruction || bodyJson.systemInstruction || bodyJson.system_instruction;
+  const contents = req.contents || bodyJson.contents;
+  const messages = req.messages || bodyJson.messages;
+  const turns = req.turns || bodyJson.turns || req.history || bodyJson.history;
+
+  const parts = [];
+
+  // Extract System Instruction
+  if (typeof sysInst === 'string' && sysInst.trim()) {
+    parts.push(`[SYSTEM INSTRUCTION]\n${sysInst.trim()}`);
+  } else if (sysInst && typeof sysInst === 'object') {
+    if (typeof sysInst.text === 'string' && sysInst.text.trim()) {
+      parts.push(`[SYSTEM INSTRUCTION]\n${sysInst.text.trim()}`);
+    } else if (Array.isArray(sysInst.parts)) {
+      const texts = sysInst.parts.map((p) => (typeof p === 'string' ? p : p?.text || p?.content || '')).filter(Boolean);
+      if (texts.length) parts.push(`[SYSTEM INSTRUCTION]\n${texts.join('\n')}`);
+    }
+  }
+
+  // Extract Contents / Turns
+  const turnsList = Array.isArray(contents) ? contents : (contents && typeof contents === 'object' ? [contents] : (Array.isArray(turns) ? turns : null));
+  if (turnsList) {
+    for (const turn of turnsList) {
+      if (!turn) continue;
+      const role = String(turn.role || turn.author || 'USER').toUpperCase();
+      const textParts = [];
+
+      if (typeof turn === 'string') {
+        textParts.push(turn);
+      } else if (typeof turn.text === 'string') {
+        textParts.push(turn.text);
+      } else if (typeof turn.content === 'string') {
+        textParts.push(turn.content);
+      } else if (Array.isArray(turn.parts)) {
+        for (const p of turn.parts) {
+          if (!p) continue;
+          if (typeof p === 'string') textParts.push(p);
+          else if (p.text) textParts.push(p.text);
+          else if (p.content) textParts.push(typeof p.content === 'string' ? p.content : JSON.stringify(p.content));
+          else if (p.inlineData) textParts.push(`[Attached Data: ${p.inlineData.mimeType || 'binary'}]`);
+          else if (p.functionCall) textParts.push(`[Tool Call: ${p.functionCall.name}(${JSON.stringify(p.functionCall.args || {})})]`);
+          else if (p.functionResponse) textParts.push(`[Tool Result: ${p.functionResponse.name} -> ${JSON.stringify(p.functionResponse.response || {})}]`);
+        }
+      }
+      if (textParts.length > 0) {
+        parts.push(`[${role}]\n${textParts.join('\n')}`);
+      }
+    }
+  }
+
+  // Extract Messages (OpenAI format)
+  if (Array.isArray(messages) && messages.length > 0) {
+    for (const m of messages) {
+      if (!m) continue;
+      const role = String(m.role || 'user').toUpperCase();
+      const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+      parts.push(`[${role}]\n${content}`);
+    }
+  }
+
+  // Direct prompt field
+  const directPrompt = req.prompt || bodyJson.prompt || req.query || bodyJson.query || req.input || bodyJson.input;
+  if (typeof directPrompt === 'string' && directPrompt.trim()) {
+    parts.push(directPrompt.trim());
+  }
+
+  if (parts.length > 0) {
+    return parts.join('\n\n');
+  }
+
+  // Deep recursive extraction for any string property named 'text', 'content', 'query', or 'prompt'
+  const deepFound = [];
+  function searchTree(node) {
+    if (!node) return;
+    if (typeof node === 'string') {
+      if (node.trim().length > 3) deepFound.push(node.trim());
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) searchTree(item);
+      return;
+    }
+    if (typeof node === 'object') {
+      if (typeof node.text === 'string' && node.text.trim()) deepFound.push(node.text.trim());
+      else if (typeof node.content === 'string' && node.content.trim()) deepFound.push(node.content.trim());
+      else if (typeof node.prompt === 'string' && node.prompt.trim()) deepFound.push(node.prompt.trim());
+      for (const k of Object.keys(node)) {
+        if (!['model', 'project', 'session', 'text', 'content', 'prompt'].includes(k)) {
+          searchTree(node[k]);
+        }
+      }
+    }
+  }
+  searchTree(bodyJson);
+
+  return deepFound.join('\n\n');
+}
+
 function sendJson(res, statusCode, data) {
   const body = JSON.stringify(data);
   res.writeHead(statusCode, {
@@ -555,7 +658,7 @@ async function forwardAvailableModels(req, res, reqBuffer) {
 
 async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStream = true) {
   const redirectConfig = getRedirectConfig();
-  const rawModel = String(bodyJson.model || '').toLowerCase();
+  const rawModel = String(bodyJson.model || bodyJson.request?.model || bodyJson.model_id || 'claude-sonnet-4-6').toLowerCase();
   const isTargeted = rawModel.includes('sonnet') || rawModel.includes('argon') || rawModel.includes('flash') || rawModel.includes('opus');
 
   // If redirect is disabled or this model is not targeted for pool routing, pass through to Google Cloud Code
@@ -563,17 +666,19 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
     return await forwardToGoogleCloudCode(req, res, rawBuf);
   }
 
-  let prompt = '';
-  if (Array.isArray(bodyJson.contents)) {
-    prompt = formatCloudCodeContentsToPrompt(bodyJson.contents, bodyJson.systemInstruction);
-  } else if (Array.isArray(bodyJson.messages)) {
-    prompt = formatMessagesToPrompt(bodyJson.messages);
-  } else if (typeof bodyJson.prompt === 'string') {
-    prompt = bodyJson.prompt;
+  // Extract prompt safely from any format of Cloud Code / Antigravity payload
+  const prompt = extractPromptFromAnyPayload(bodyJson);
+  if (!prompt || !prompt.trim()) {
+    console.warn('[Argon Gateway] No prompt text extracted from payload. Forwarding transparently to Cloud Code upstream.');
+    return await forwardToGoogleCloudCode(req, res, rawBuf);
   }
 
-  if (!prompt.trim()) {
-    return sendError(res, 400, 'Cloud Code generateContent prompt/contents cannot be empty');
+  if (rawModel.includes('sonnet')) {
+    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Claude Sonnet 4.6 request -> Redirecting to Gemini 4 Argon with Agent Mode quota (action: 12)`);
+  } else if (rawModel.includes('argon')) {
+    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini 4 Argon request -> Serving with Agent Mode quota (action: 12)`);
+  } else if (rawModel.includes('flash')) {
+    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini 3.8 Flash request -> Serving with Agent Mode quota (action: 12)`);
   }
 
   let account = pool.getActiveAccount();
