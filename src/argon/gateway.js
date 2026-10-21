@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { AccountPool, BASE_URL, USER_AGENT } = require('./account-pool');
+const { KeepAliveManager } = require('./keepalive-manager');
 const { createAgent, doRequest } = require('./http-client');
 const {
   GENERATE_PATH,
@@ -41,7 +42,8 @@ const pool = new AccountPool({
   agent: httpAgent,
 });
 
-pool.startKeepAliveLoop();
+const keepAliveManager = new KeepAliveManager(pool);
+keepAliveManager.start();
 
 const KNOWN_UPSTREAM_MODELS = {
   'gemini-4-argon': 'e6fa609c3fa255c0',
@@ -871,7 +873,13 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
       port: config.port,
       proxy: config.proxy || 'direct',
       total: status.totalAccounts,
+      keepAlive: keepAliveManager.getStatus(),
     });
+  }
+
+  // Admin API: Keep-Alive Diagnostic Status
+  if (req.method === 'GET' && pathname === '/admin/api/keepalive') {
+    return sendJson(res, 200, keepAliveManager.getStatus());
   }
 
   // Admin API: Add Account

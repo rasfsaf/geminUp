@@ -1889,12 +1889,49 @@ function Test-ArgonListener {
     }
 }
 
-function Get-NodeExecutable {
-    $nodeCmd = Get-Command 'node' -ErrorAction SilentlyContinue
-    if ($null -ne $nodeCmd -and -not [string]::IsNullOrWhiteSpace($nodeCmd.Source)) {
-        return $nodeCmd.Source
+function Install-PortableNode {
+    [CmdletBinding()]
+    param()
+
+    $targetDir = Join-Path $script:InstallRoot 'bin'
+    if (-not (Test-Path -LiteralPath $targetDir)) {
+        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
     }
+    $targetExe = Join-Path $targetDir 'node.exe'
+    if (Test-Path -LiteralPath $targetExe) {
+        return $targetExe
+    }
+
+    Write-TransportLog INFO 'Node.js runtime was not found on this system.'
+    Write-Host '  Auto-downloading portable Node.js runtime from nodejs.org...' -ForegroundColor Cyan
+    Write-Host '  Source: https://nodejs.org/dist/latest-v20.x/win-x64/node.exe' -ForegroundColor DarkGray
+
+    $uri = 'https://nodejs.org/dist/latest-v20.x/win-x64/node.exe'
+    $tmpExe = "$targetExe.tmp"
+
+    try {
+        $webClient = New-Object System.Net.WebClient
+        if (Test-TransportListener -TimeoutMilliseconds 250) {
+            $webClient.Proxy = New-Object System.Net.WebProxy("http://127.0.0.1:$script:ListenPort")
+        }
+        $webClient.Headers.Add('User-Agent', 'geminUp-Bootstrap/1.5')
+        $webClient.DownloadFile($uri, $tmpExe)
+        Move-Item -LiteralPath $tmpExe -Destination $targetExe -Force
+        Write-TransportLog OK "Portable Node.js successfully installed: $targetExe"
+        return $targetExe
+    }
+    catch {
+        if (Test-Path -LiteralPath $tmpExe) { Remove-Item -LiteralPath $tmpExe -Force -ErrorAction SilentlyContinue }
+        throw "Failed to download portable Node.js runtime: $($_.Exception.Message). Please install Node.js manually from https://nodejs.org."
+    }
+}
+
+function Get-NodeExecutable {
+    param([switch]$AutoInstall)
+
     $commonPaths = @(
+        (Join-Path $script:InstallRoot 'bin\node.exe'),
+        (Join-Path $script:ArgonDir 'node.exe'),
         "$env:ProgramFiles\nodejs\node.exe",
         "${env:ProgramFiles(x86)}\nodejs\node.exe",
         "$env:LOCALAPPDATA\Programs\node\node.exe"
@@ -1902,6 +1939,16 @@ function Get-NodeExecutable {
     foreach ($p in $commonPaths) {
         if (Test-Path -LiteralPath $p) { return $p }
     }
+
+    $nodeCmd = Get-Command 'node' -ErrorAction SilentlyContinue
+    if ($null -ne $nodeCmd -and -not [string]::IsNullOrWhiteSpace($nodeCmd.Source)) {
+        return $nodeCmd.Source
+    }
+
+    if ($AutoInstall) {
+        return (Install-PortableNode)
+    }
+
     return $null
 }
 
@@ -1979,9 +2026,9 @@ function Start-ArgonBridge {
     Assert-SupportedWindows
     Assert-Administrator
 
-    $nodeExe = Get-NodeExecutable
+    $nodeExe = Get-NodeExecutable -AutoInstall
     if ($null -eq $nodeExe) {
-        throw 'Node.js is not installed or not in PATH. Please install Node.js (https://nodejs.org) to run Argon Gateway.'
+        throw 'Node.js is not installed and auto-download failed. Please install Node.js manually (https://nodejs.org).'
     }
 
     Sync-ArgonEngineFiles
@@ -2293,6 +2340,18 @@ function Show-ArgonAccounts {
         Write-Host '  Developer Blog: https://t.me/iqsklad20          ' -ForegroundColor Magenta
         Write-Host '==================================================' -ForegroundColor Cyan
         Write-Host "Total Accounts: $($poolData.totalAccounts) | Active ID: $($poolData.activeAccountId)" -ForegroundColor White
+
+        if ($poolData.PSObject.Properties.Name -contains 'keepAlive' -and $null -ne $poolData.keepAlive) {
+            $ka = $poolData.keepAlive
+            $cdText = if ($ka.cooldownRemainingSec -gt 0) { "cooldown active: $($ka.cooldownRemainingSec)s" } else { 'ready' }
+            Write-Host "Auto Health Keeper: 24h Idle Schedule | 5m Cooldown ($cdText) | Due: $($ka.dueCount)" -ForegroundColor DarkCyan
+            if (-not [string]::IsNullOrWhiteSpace($ka.lastRequestSentAt)) {
+                Write-Host "Last Health Ping Sent: $($ka.lastRequestSentAt)" -ForegroundColor DarkGray
+            }
+            if ($null -ne $ka.recentEvents -and @($ka.recentEvents).Count -gt 0 -and $null -ne $ka.recentEvents[0].downtimeMinutes) {
+                Write-Host "Uptime Tracking:       Last PC downtime was $($ka.recentEvents[0].downtimeMinutes) min (Resumed: $($ka.recentEvents[0].resumedAt))" -ForegroundColor DarkGray
+            }
+        }
         Write-Host ''
 
         if ($poolData.accounts.Count -eq 0) {
@@ -2554,6 +2613,7 @@ function Show-ArgonMenu {
         Write-Host $acctLabel -ForegroundColor $acctColor
         Write-Host -NoNewline '  Ultra-Quota Route:    '
         Write-Host $antigravityRouting -ForegroundColor $routingColor
+        Write-Host "  Auto Health Keeper:   24h Idle Ping (5m Cooldown, Windows Uptime Tracked)" -ForegroundColor DarkCyan
         Write-Host "  Upstream:             $transportRoute" -ForegroundColor White
         Write-Host "  Local URL:            http://127.0.0.1:$($script:ArgonListenPort)/v1" -ForegroundColor DarkGray
         Write-Host ''
