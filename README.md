@@ -2,7 +2,9 @@
 
 # geminUp
 
-`geminUp` — открытый проект для доступа к Google Gemini через пользовательский SOCKS5-прокси.
+[![Telegram Channel](https://img.shields.io/badge/Telegram-Канал%20Разработчика-blue?logo=telegram)](https://t.me/iqsklad20)
+
+`geminUp` — открытый проект для доступа к Google Gemini через пользовательский SOCKS5-прокси и автономный шлюз Gemini 4 Argon.
 
 В проект входят два разных компонента:
 
@@ -76,7 +78,16 @@ Android-приложение не является VPN и не перехват�
 
 Пункты 6 и 7 правят `language_server*.exe` и `agy.exe`: поле protobuf `ineligible` заменяется на `inexigible`. Длина строки та же, размер и структура файла не меняются. Enable и Refresh применяют патч сами; пункт 6 запускает его отдельно, пункт 7 возвращает `ineligible`. Та же замена снимает другие клиентские ошибки Antigravity, завязанные на это поле, включая состояние ineligible account (`SET_INELIGIBLE` / `ineligibleTiers`). Если установка не найдена, меню просит путь к exe или к папке. Полный обход папки начинается с `scan `, если обычных мест недостаточно.
 
-Пункт 8 открывает меню автономного локального шлюза Gemini 4 Argon (100% локальный, конфиденциальный, нулевые внешние зависимости). Запускает нативный фоновый сервис на `127.0.0.1:8083` с квотами Antigravity Agent Mode (`action: 12`), пулом Google-аккаунтов со sticky-распределением (affinity сессии для мгновенного ответа в IDE без задержек холодного старта), автоматическим failover на резервные аккаунты при 429/исчерпании квот и периодическим фоновым keep-alive для предотвращения протухания сессий. Шлюз предоставляет стандартный OpenAI-совместимый API (`http://127.0.0.1:8083/v1`) с поддержкой моделей `gemini-4-argon`, `gemini-4-argon-thinking-medium`, `gemini-3.8-flash`, `gemini-3.1-pro` для IDE-расширений (Roo Code, Cline, Cursor, Continue и др.).
+Пункт 8 открывает меню автономного локального шлюза Gemini 4 Argon (100% локальный, конфиденциальный, без внешних зависимостей). Сервис запускается на `127.0.0.1:8083` и реализует уникальную архитектуру:
+- **Разблокировка Gemini 4 Argon в интерфейсе Antigravity:** при включении маршрутизации шлюз транслирует статус модели `gemini-4-argon` без флага `"tagTitle": "Unavailable"` и `"disabled": false`, делая модель нативно доступной для выбора прямо в выпадающем списке моделей Antigravity.
+- **Расширенные квоты Antigravity Agent Mode (`action: 12`):** Protobuf-запросы принудительно задействуют серверный режим агента, обходя жесткие 5-часовые лимиты обычного веб-чата (`action: 2`).
+- **Сквозная маршрутизация Claude и Gemini:** запросы моделей Claude (Sonnet 3.7 / Opus) или Gemini прозрачно перенаправляются в локальный пайплайн Argon с сохранением максимальной производительности.
+- **Изоляция параллельных чатов и субагентов:** каждый запрос выполняется полностью stateless со стороны Google Web RPC (`temporary: true`, уникальный request UUID). Контекст диалога хранится исключительно на стороне клиента (IDE), поэтому множество открытых вкладок и параллельно запущенных субагентов работают абсолютно изолированно и никогда не смешивают контексты.
+- **Sticky-пул аккаунтов и мгновенный failover:** шлюз удерживает один рабочий аккаунт (время первого токена 1–2 сек) и автоматически переключается на резервные аккаунты из пула `%ProgramData%\geminUp\argon\accounts.json` при получении HTTP 429 или исчерпании лимита.
+- **Непрерывный Keep-Alive сессий:** периодический фоновый опрос квот (`qpEbW`) автоматически подхватывает ротируемые токены `__Secure-1PSIDTS` из заголовков ответа Google, предотвращая устаревание сессий.
+- **Наглядный мониторинг квот в CLI:** в консоли отображаются живые индикаторы остатка квот Antigravity Agent Mode (`action: 12`) и Web Chat (`action: 2`) для всех аккаунтов в ротации.
+- **Двойной API-интерфейс:** шлюз поддерживает как нативный протокол Antigravity Cloud Code (`/v1internal:*`), так и стандартный OpenAI-совместимый API (`http://127.0.0.1:8083/v1`) для сторонних расширений (Roo Code, Cline, Cursor, Continue и др.).
+- **Канал разработчика в Telegram:** новости, обновления и инсайты проекта публикуются в канале [https://t.me/iqsklad20](https://t.me/iqsklad20).
 
 Поддерживаются форматы:
 
@@ -225,7 +236,9 @@ cd android
 
 [🇷🇺 Русский](#geminup) | [🇬🇧 English](#geminup---english)
 
-`geminUp` is an open-source project for accessing Google Gemini through a user-provided SOCKS5 proxy.
+[![Telegram Channel](https://img.shields.io/badge/Telegram-Developer%20Channel-blue?logo=telegram)](https://t.me/iqsklad20)
+
+`geminUp` is an open-source project for accessing Google Gemini through a user-provided SOCKS5 proxy and autonomous Gemini 4 Argon gateway.
 
 The project includes two independent components:
 
@@ -299,7 +312,16 @@ Option 5 toggles between `Enable YouTube routing` and `Disable YouTube routing`.
 
 Items 6 and 7 patch `language_server*.exe` and `agy.exe`: the protobuf field `ineligible` is rewritten as `inexigible`. The strings are the same length, so the file size and layout do not change. Enable and Refresh apply the patch automatically; item 6 runs it on its own, and item 7 restores `ineligible`. The same rewrite clears other Antigravity client errors tied to that field, including the ineligible-account state (`SET_INELIGIBLE` / `ineligibleTiers`). If the install is not found, the menu asks for the binary or its folder. Prefix a folder with `scan ` only when the usual locations are not enough.
 
-Option 8 opens the autonomous local Gemini 4 Argon gateway menu (100% local, confidential, zero external dependencies). It runs a native background daemon on `127.0.0.1:8083` utilizing high Antigravity Agent Mode quotas (`action: 12`), a sticky Google account pool (session affinity for instant 1-2s turn responses in IDEs without cold session restart delays), automatic failover to standby accounts on 429 quota exhaustion, and continuous rolling cookie keep-alive (`__Secure-1PSIDTS`). The gateway exposes a standard OpenAI-compatible API (`http://127.0.0.1:8083/v1`) supporting `gemini-4-argon`, `gemini-4-argon-thinking-medium`, `gemini-3.8-flash`, and `gemini-3.1-pro` models for IDE extensions (Roo Code, Cline, Cursor, Continue, etc.).
+Option 8 opens the autonomous local Gemini 4 Argon gateway menu (100% local, confidential, zero external dependencies). It runs a native background daemon on `127.0.0.1:8083` featuring a breakthrough architectural design:
+- **Native Antigravity Model Unlocking:** when routing is enabled, the gateway strips the `"tagTitle": "Unavailable"` status and emits `"disabled": false`, naturally unlocking `gemini-4-argon` directly in the native Antigravity model dropdown.
+- **Antigravity Agent Mode Quota (`action: 12`):** Protobuf RPC frames force Google's backend to consume the extended Antigravity Agent quota instead of the restrictive 5-hour web chat limit (`action: 2`).
+- **Seamless Claude & Gemini Transparent Routing:** requests specifying Claude models (Sonnet 3.7 / Opus) or Gemini are transparently routed through the local Argon pipeline for maximum intelligence.
+- **Concurrent Chats & Subagent Isolation:** every turn operates completely stateless on Google Web RPC (`temporary: true`, unique turn UUID). Because conversation trajectory is retained strictly client-side by the IDE, multiple concurrent chat tabs and parallel subagents run in complete isolation with zero context collision or leakage.
+- **Sticky Account Pool with Zero-Lag Responses:** holds an active account affinity for instant 1–2s turns, failing over smoothly to standby accounts in `%ProgramData%\geminUp\argon\accounts.json` on HTTP 429 without dropping conversational context.
+- **Continuous Rolling Keep-Alive:** periodic background heartbeat calls (`qpEbW`) automatically ingest updated `__Secure-1PSIDTS` cookies from Google, preventing session expiration.
+- **Rich CLI Quota Monitors:** live console indicators track remaining Antigravity Agent Mode (`action: 12`) and Web Chat (`action: 2`) quotas alongside reset countdowns.
+- **Dual API Surface:** supports native Antigravity Cloud Code protocol (`/v1internal:*`) and standard OpenAI-compatible API (`http://127.0.0.1:8083/v1`) for external tools (Roo Code, Cline, Cursor, Continue, etc.).
+- **Developer Telegram Channel:** announcements, updates, and deep dives are shared at [https://t.me/iqsklad20](https://t.me/iqsklad20).
 
 Supported formats:
 

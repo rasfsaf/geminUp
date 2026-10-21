@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status', 'watchdog', 'antigravity-patch', 'antigravity-rollback', 'argon-menu', 'argon-enable', 'argon-disable', 'argon-status', 'argon-cookie', 'argon-test')]
+    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status', 'watchdog', 'antigravity-patch', 'antigravity-rollback', 'argon-menu', 'argon-enable', 'argon-disable', 'argon-status', 'argon-cookie', 'argon-test', 'argon-route')]
     [string]$Action = 'menu'
 )
 
@@ -1024,12 +1024,103 @@ function Invoke-AntigravityBinaryPatch {
         }
     }
 
+    # Also update app.asar router hook
+    try {
+        $asarChanged = Invoke-AntigravityAsarPatch -Direction $Direction
+        if ($asarChanged) { $changed++ }
+    } catch {
+        Write-Warning "  app.asar: $($_.Exception.Message)"
+    }
+
     if ($changed -eq 0) {
         Write-Host "$label did not change files (already applied, or the marker is missing)." -ForegroundColor DarkYellow
     } else {
         Write-Host "$label applied to $changed Antigravity file(s). File sizes were not changed." -ForegroundColor Green
     }
     return ($changed -gt 0)
+}
+
+function Invoke-AntigravityAsarPatch {
+    param([ValidateSet('Apply', 'Rollback')][string]$Direction = 'Apply')
+
+    $candidates = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\Antigravity\resources\app.asar'),
+        (Join-Path $env:ProgramFiles 'Antigravity\resources\app.asar'),
+        'C:\Users\0SLEK\AppData\Local\Programs\Antigravity\resources\app.asar'
+    )
+    $targetPath = $null
+    foreach ($cand in $candidates) {
+        if (Test-Path -LiteralPath $cand) {
+            $targetPath = $cand
+            break
+        }
+    }
+    if (-not $targetPath) {
+        Write-TransportLog WARN 'Antigravity app.asar not found.'
+        return $false
+    }
+
+    $s1 = "            '--cloud_code_endpoint',`n            'https://daily-cloudcode-pa.googleapis.com',`n            '--enable_sidecars',`n        ];`n        // Point the LS at the main process' host bridge server."
+    $s2 = "            '--cloud_code_endpoint',`n            process.env.ARGON_ENDPOINT||'https://daily-cloudcode-pa.googleapis.com',`n            '--enable_sidecars',`n        ];`n        /* geminUp */"
+    $s2Padded = $s2.PadRight($s1.Length, ' ')
+
+    $from = if ($Direction -eq 'Apply') { $s1 } else { $s2Padded }
+    $to = if ($Direction -eq 'Apply') { $s2Padded } else { $s1 }
+
+    $bytes = [System.IO.File]::ReadAllBytes($targetPath)
+    $fromBytes = [System.Text.Encoding]::UTF8.GetBytes($from)
+    $toBytes = [System.Text.Encoding]::UTF8.GetBytes($to)
+
+    $hits = @(Find-AntigravityMarkerOffsets -Haystack $bytes -Needle $fromBytes)
+    if ($hits.Count -eq 0) {
+        $already = @(Find-AntigravityMarkerOffsets -Haystack $bytes -Needle $toBytes)
+        if ($already.Count -gt 0) {
+            Write-Host "  [OK] app.asar is already in the requested ($Direction) state" -ForegroundColor Green
+            return $true
+        }
+        Write-Warning "  $targetPath: Cloud Code endpoint marker not found, file skipped."
+        return $false
+    }
+
+    Stop-AntigravityProcesses
+    $backup = "$targetPath.bak"
+    if (-not (Test-Path -LiteralPath $backup)) {
+        Write-Host '  writing app.asar backup...' -ForegroundColor DarkCyan
+        Copy-Item -LiteralPath $targetPath -Destination $backup -ErrorAction Stop
+    }
+
+    foreach ($hit in $hits) {
+        [Buffer]::BlockCopy($toBytes, 0, $bytes, $hit, $toBytes.Length)
+    }
+
+    [System.IO.File]::WriteAllBytes($targetPath, $bytes)
+    Write-Host "  [OK] app.asar: patched Cloud Code router hook (replacements=$($hits.Count))" -ForegroundColor Green
+    return $true
+}
+
+function Switch-AntigravityArgonRouting {
+    $current = [Environment]::GetEnvironmentVariable('ARGON_ENDPOINT', 'User')
+    $targetUrl = "http://127.0.0.1:$script:ArgonListenPort"
+
+    if ([string]::IsNullOrWhiteSpace($current)) {
+        Write-Host 'Activating native Antigravity routing to local Argon Gateway...' -ForegroundColor Cyan
+        Invoke-AntigravityAsarPatch -Direction Apply | Out-Null
+        [Environment]::SetEnvironmentVariable('ARGON_ENDPOINT', $targetUrl, 'User')
+        [Environment]::SetEnvironmentVariable('ARGON_ENDPOINT', $targetUrl, 'Process')
+        Write-Host ''
+        Write-TransportLog OK "Antigravity routing ENABLED -> $targetUrl"
+        Write-Host '  Native Gemini 4 Argon & Agent Mode quota is now linked to Antigravity IDE.' -ForegroundColor Green
+        Write-Host '  Please restart Antigravity IDE to activate the connection!' -ForegroundColor Yellow
+        Write-Host ''
+    } else {
+        Write-Host 'Deactivating native Antigravity routing...' -ForegroundColor Cyan
+        [Environment]::SetEnvironmentVariable('ARGON_ENDPOINT', $null, 'User')
+        [Environment]::SetEnvironmentVariable('ARGON_ENDPOINT', $null, 'Process')
+        Write-Host ''
+        Write-TransportLog OK "Antigravity routing DISABLED. Restored default Google Cloud Code."
+        Write-Host '  Please restart Antigravity IDE to revert to default.' -ForegroundColor Yellow
+        Write-Host ''
+    }
 }
 
 function Set-AntigravityShortcutRouting {
@@ -1470,6 +1561,7 @@ function Show-TransportStatus {
 
     Write-Host ''
     Write-Host 'geminUp' -ForegroundColor Green
+    Write-Host '  Developer Blog: https://t.me/iqsklad20' -ForegroundColor Magenta
     Write-Host ('  Version:       {0}' -f $script:TransportVersion)
     Write-Host ('  Installed:     {0}' -f $installed)
     Write-Host ('  SOCKS stored:  {0}' -f $configured)
@@ -2118,6 +2210,15 @@ function Set-ArgonCookie {
     Add-ArgonAccount
 }
 
+function Format-QuotaProgressBar {
+    param([int]$UsedPercent)
+    $clamped = [Math]::Max(0, [Math]::Min(100, $UsedPercent))
+    $filled = [Math]::Round($clamped / 10)
+    $empty = 10 - $filled
+    $bar = ('█' * $filled) + ('░' * $empty)
+    return "[$bar] $clamped%"
+}
+
 function Show-ArgonAccounts {
     $status = Get-ArgonBridgeStatus
     if (-not $status.Listening) {
@@ -2130,6 +2231,7 @@ function Show-ArgonAccounts {
         Write-Host ''
         Write-Host '==================================================' -ForegroundColor Cyan
         Write-Host '           Argon Gateway Account Pool             ' -ForegroundColor Cyan
+        Write-Host '  Developer Blog: https://t.me/iqsklad20          ' -ForegroundColor Magenta
         Write-Host '==================================================' -ForegroundColor Cyan
         Write-Host "Total Accounts: $($poolData.totalAccounts) | Active ID: $($poolData.activeAccountId)" -ForegroundColor White
         Write-Host ''
@@ -2149,12 +2251,23 @@ function Show-ArgonAccounts {
 
             if ($null -ne $acc.quota -and ($acc.quota.PSObject.Properties.Name -contains 'items')) {
                 $agentQuota = @($acc.quota.items | Where-Object { $_.action -eq 12 } | Select-Object -First 1)
+                $chatQuota = @($acc.quota.items | Where-Object { $_.action -eq 2 -and ($null -eq $_.mode -or $_.mode -eq 0) } | Select-Object -First 1)
+
                 if ($agentQuota.Count -gt 0) {
-                    Write-Host "         Antigravity Quota: $($agentQuota[0].usedPercent)% used ($($agentQuota[0].status))" -ForegroundColor Cyan
+                    $bar = Format-QuotaProgressBar -UsedPercent ([int]$agentQuota[0].usedPercent)
+                    $reset = if ($agentQuota[0].resetAt) { "(Resets: $($agentQuota[0].resetAt))" } else { '' }
+                    Write-Host "         Antigravity Agent Mode (action: 12): $bar $($agentQuota[0].status) $reset" -ForegroundColor Cyan
+                } else {
+                    Write-Host "         Antigravity Agent Mode (action: 12): [░░░░░░░░░░] 0% (Full / Ready)" -ForegroundColor Cyan
+                }
+
+                if ($chatQuota.Count -gt 0) {
+                    $cBar = Format-QuotaProgressBar -UsedPercent ([int]$chatQuota[0].usedPercent)
+                    Write-Host "         Web Chat Limit (action: 2):          $cBar $($chatQuota[0].status)" -ForegroundColor DarkYellow
                 }
             }
             if (-not [string]::IsNullOrWhiteSpace($acc.lastKeepAliveAt)) {
-                Write-Host "         Last Keep-Alive:   $($acc.lastKeepAliveAt)" -ForegroundColor DarkGray
+                Write-Host "         Last Heartbeat Keep-Alive:          $($acc.lastKeepAliveAt)" -ForegroundColor DarkGray
             }
             Write-Host ''
         }
@@ -2280,27 +2393,24 @@ function Show-ArgonConnectionInfo {
     Write-Host ''
     Write-Host '==================================================' -ForegroundColor Cyan
     Write-Host '  How to Use Gemini 4 Argon in Antigravity / IDE' -ForegroundColor Cyan
+    Write-Host '  Developer Blog: https://t.me/iqsklad20          ' -ForegroundColor Magenta
     Write-Host '==================================================' -ForegroundColor Cyan
-    Write-Host 'The Gateway provides a standard OpenAI-compatible API on:' -ForegroundColor White
+    Write-Host 'Native Antigravity Integration (Automatic Routing):' -ForegroundColor Yellow
+    Write-Host '  1. Start Argon Gateway (Option 1 in this menu)'
+    Write-Host '  2. Select Option 7 ("Toggle Antigravity Route") to link Antigravity IDE'
+    Write-Host '  3. Restart Antigravity IDE'
+    Write-Host '  4. Gemini 4 Argon is now unlocked natively in the model picker!'
+    Write-Host '     (tagTitle: Unavailable badge is removed; full Agent Mode quota active)'
+    Write-Host ''
+    Write-Host 'OpenAI-Compatible API (for Roo Code / Cline / Cursor / OpenCode):' -ForegroundColor Yellow
     Write-Host "  Endpoint: http://127.0.0.1:$($script:ArgonListenPort)/v1" -ForegroundColor Green
-    Write-Host '  API Key:  (any string, e.g. "geminup")' -ForegroundColor Green
-    Write-Host '  Models:   gemini-4-argon' -ForegroundColor Green
-    Write-Host '            gemini-4-argon-thinking-medium' -ForegroundColor Green
-    Write-Host '            gemini-3.8-flash' -ForegroundColor Green
-    Write-Host '            gemini-3.1-pro' -ForegroundColor Green
+    Write-Host '  API Key:  geminup (or any value)' -ForegroundColor Green
+    Write-Host '  Model ID: gemini-4-argon' -ForegroundColor Green
     Write-Host ''
-    Write-Host 'Connecting in Roo Code / Cline / Cursor / OpenCode / Continue:' -ForegroundColor Yellow
-    Write-Host '  1. Open Extension Settings (Roo Code / Cline / etc.)'
-    Write-Host '  2. Provider: OpenAI Compatible'
-    Write-Host "  3. Base URL: http://127.0.0.1:$($script:ArgonListenPort)/v1"
-    Write-Host '  4. API Key:  geminup'
-    Write-Host '  5. Model ID: gemini-4-argon'
-    Write-Host ''
-    Write-Host 'Features:' -ForegroundColor Yellow
-    Write-Host '  - High Antigravity Agent Mode quota (action: 12)'
-    Write-Host '  - Sticky account affinity (instant turn responses, 1-2s latency)'
-    Write-Host '  - Automatic failover to standby accounts on 429 quota exhaustion'
-    Write-Host '  - Continuous rolling cookie keep-alive (__Secure-1PSIDTS)'
+    Write-Host 'Multi-Chat & Subagent Architecture:' -ForegroundColor Yellow
+    Write-Host '  - Stateless RPC turns (temporary: true, unique request IDs)'
+    Write-Host '  - Multiple concurrent chat tabs and parallel subagents run with ZERO collision'
+    Write-Host '  - Sticky account pool fails over seamlessly on quota exhaustion without losing context'
     Write-Host ''
 }
 
@@ -2313,16 +2423,22 @@ function Show-ArgonMenu {
         $acctLabel = if ($status.AccountsCount -gt 0) { "$($status.AccountsCount) account(s) (Active: $($status.ActiveAccountLabel))" } else { 'NO ACCOUNTS' }
         $acctColor = if ($status.AccountsCount -gt 0) { 'Green' } else { 'Yellow' }
         $transportRoute = if (Test-TransportListener -TimeoutMilliseconds 250) { "SOCKS5 (127.0.0.1:$script:ListenPort)" } else { 'Direct' }
+        $routingEnv = [Environment]::GetEnvironmentVariable('ARGON_ENDPOINT', 'User')
+        $antigravityRouting = if (-not [string]::IsNullOrWhiteSpace($routingEnv)) { "ENABLED ($routingEnv)" } else { 'DISABLED (Direct Cloud Code)' }
+        $routingColor = if (-not [string]::IsNullOrWhiteSpace($routingEnv)) { 'Green' } else { 'DarkGray' }
 
         Write-Host '==================================================' -ForegroundColor Cyan
         Write-Host '  Gemini 4 Argon Pipeline (Native Gateway Engine)' -ForegroundColor Cyan
+        Write-Host '  Developer Blog: https://t.me/iqsklad20          ' -ForegroundColor Magenta
         Write-Host '==================================================' -ForegroundColor Cyan
-        Write-Host -NoNewline '  Gateway Status:  '
+        Write-Host -NoNewline '  Gateway Status:       '
         Write-Host $statusLabel -ForegroundColor $statusColor
-        Write-Host -NoNewline '  Account Pool:    '
+        Write-Host -NoNewline '  Account Pool:         '
         Write-Host $acctLabel -ForegroundColor $acctColor
-        Write-Host "  Upstream:        $transportRoute" -ForegroundColor White
-        Write-Host "  Local URL:       http://127.0.0.1:$($script:ArgonListenPort)/v1" -ForegroundColor DarkGray
+        Write-Host -NoNewline '  Antigravity Routing:  '
+        Write-Host $antigravityRouting -ForegroundColor $routingColor
+        Write-Host "  Upstream:             $transportRoute" -ForegroundColor White
+        Write-Host "  Local URL:            http://127.0.0.1:$($script:ArgonListenPort)/v1" -ForegroundColor DarkGray
         Write-Host ''
         Write-Host '  1. Start / Restart Argon Gateway'
         Write-Host '  2. Add Google Account (Clipboard / File / Paste)'
@@ -2330,12 +2446,13 @@ function Show-ArgonMenu {
         Write-Host '  4. Remove Account from Pool'
         Write-Host '  5. Force Session Keep-Alive & Quota Refresh'
         Write-Host '  6. Test Argon Model Status & Latency'
-        Write-Host '  7. Stop Argon Gateway'
-        Write-Host '  8. Connection Instructions for IDE'
-        Write-Host '  9. Return to main menu'
+        Write-Host '  7. Toggle Antigravity Route (Link/Unlink Antigravity IDE)'
+        Write-Host '  8. Stop Argon Gateway'
+        Write-Host '  9. Connection Instructions for IDE'
+        Write-Host '  0. Return to main menu'
         Write-Host ''
 
-        $sub = Read-Host 'Select 1-9'
+        $sub = Read-Host 'Select 0-9'
         try {
             switch ($sub) {
                 '1' { Start-ArgonBridge; Start-Sleep -Seconds 2; break }
@@ -2344,10 +2461,11 @@ function Show-ArgonMenu {
                 '4' { Remove-ArgonAccount; Start-Sleep -Seconds 2; break }
                 '5' { Invoke-ArgonKeepAlive; Read-Host 'Press Enter to continue'; break }
                 '6' { Test-ArgonPipeline; Read-Host 'Press Enter to continue'; break }
-                '7' { Stop-ArgonBridge; Start-Sleep -Seconds 1; break }
-                '8' { Show-ArgonConnectionInfo; Read-Host 'Press Enter to continue'; break }
-                '9' { return }
-                default { Write-TransportLog WARN 'Enter 1 through 9.'; Start-Sleep -Seconds 2; continue }
+                '7' { Switch-AntigravityArgonRouting; Start-Sleep -Seconds 2; break }
+                '8' { Stop-ArgonBridge; Start-Sleep -Seconds 1; break }
+                '9' { Show-ArgonConnectionInfo; Read-Host 'Press Enter to continue'; break }
+                '0' { return }
+                default { Write-TransportLog WARN 'Enter 0 through 9.'; Start-Sleep -Seconds 2; continue }
             }
         }
         catch {
@@ -2413,6 +2531,7 @@ try {
         'argon-account' { Add-ArgonAccount }
         'argon-test' { Test-ArgonPipeline }
         'argon-keepalive' { Invoke-ArgonKeepAlive }
+        'argon-route' { Switch-AntigravityArgonRouting }
     }
 }
 catch {

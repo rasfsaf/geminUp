@@ -48,6 +48,10 @@ const KNOWN_UPSTREAM_MODELS = {
   'gemini-3.1-pro': 'e6fa609c3fa255c0',
   'gemini-3.1-pro-advanced': 'e6fa609c3fa255c0',
   'gemini-3.5-flash-lite': '8c46e95b1a07cecc',
+  'claude-3-7-sonnet': 'e6fa609c3fa255c0',
+  'claude-sonnet-4': 'e6fa609c3fa255c0',
+  'claude-3-5-sonnet': 'e6fa609c3fa255c0',
+  'claude-opus-5-5': 'e6fa609c3fa255c0',
 };
 
 const SUPPORTED_MODELS = [
@@ -58,10 +62,79 @@ const SUPPORTED_MODELS = [
   { id: 'gemini-3.1-pro', object: 'model', owned_by: 'google', permission: [] },
   { id: 'gemini-3.1-pro-advanced', object: 'model', owned_by: 'google', permission: [] },
   { id: 'gemini-3.5-flash-lite', object: 'model', owned_by: 'google', permission: [] },
+  { id: 'claude-3-7-sonnet', object: 'model', owned_by: 'anthropic', permission: [] },
+  { id: 'claude-sonnet-4', object: 'model', owned_by: 'anthropic', permission: [] },
+  { id: 'claude-opus-5-5', object: 'model', owned_by: 'anthropic', permission: [] },
 ];
 
+const CLOUD_CODE_CATALOG = {
+  models: {
+    'gemini-4-argon': {
+      displayName: 'Gemini 4 Argon (geminUp Unlocked)',
+      description: 'High-reasoning autonomous agent with Antigravity Agent Mode quota',
+      tagTitle: '',
+      tagDescription: 'Unlocked via geminUp Argon Engine',
+      disabled: false,
+      supportsRawThinking: true,
+      supportsAdaptiveThinking: true,
+      supportsThoughtCirculation: true,
+      preview: false,
+    },
+    'gemini-4-argon-thinking-medium': {
+      displayName: 'Gemini 4 Argon (Thinking Medium)',
+      description: 'Extended depth reasoning model with Antigravity Agent Mode quota',
+      tagTitle: '',
+      tagDescription: 'Unlocked via geminUp Argon Engine',
+      disabled: false,
+      supportsRawThinking: true,
+      supportsAdaptiveThinking: true,
+      supportsThoughtCirculation: true,
+      preview: false,
+    },
+    'gemini-3.8-flash': {
+      displayName: 'Gemini 3.8 Flash (Argon Engine)',
+      description: 'Ultra-low latency coding model',
+      tagTitle: '',
+      disabled: false,
+    },
+    'gemini-3.1-pro': {
+      displayName: 'Gemini 3.1 Pro (Argon Engine)',
+      description: 'Advanced architecture model',
+      tagTitle: '',
+      disabled: false,
+    },
+    'claude-3-7-sonnet': {
+      displayName: 'Claude 3.7 Sonnet (Argon Routed)',
+      description: 'Routed through local Argon Gateway with Agent Mode quota',
+      tagTitle: '',
+      disabled: false,
+    },
+  },
+  defaultAgentModelId: 'gemini-4-argon',
+  agentModelSorts: [
+    {
+      displayName: 'geminUp Unlocked Engine',
+      groups: [
+        {
+          displayName: 'Gemini 4 Argon & Pro',
+          modelIds: [
+            'gemini-4-argon',
+            'gemini-4-argon-thinking-medium',
+            'gemini-3.8-flash',
+            'gemini-3.1-pro',
+            'claude-3-7-sonnet',
+          ],
+        },
+      ],
+    },
+  ],
+};
+
 function resolveModelUpstream(requestedModel, account) {
-  const norm = String(requestedModel || '').toLowerCase().replace(/^google\//, '').replace(/^gemini\//, '');
+  let norm = String(requestedModel || '').toLowerCase().replace(/^google\//, '').replace(/^gemini\//, '').replace(/^anthropic\//, '');
+  if (norm.includes('argon') || norm.includes('sonnet') || norm.includes('opus')) {
+    norm = 'gemini-4-argon';
+  }
   if (account && Array.isArray(account.availableModels)) {
     const discovered = account.availableModels.find((m) => (
       m.id.toLowerCase() === norm || m.displayName.toLowerCase().includes(norm)
@@ -80,6 +153,31 @@ function formatMessagesToPrompt(messages) {
     const role = (m.role || 'user').toUpperCase();
     const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
     parts.push(`[${role}]\n${content}`);
+  }
+  return parts.join('\n\n');
+}
+
+function formatCloudCodeContentsToPrompt(contents, systemInstruction) {
+  const parts = [];
+  if (systemInstruction && Array.isArray(systemInstruction.parts)) {
+    const sysTexts = systemInstruction.parts.map((p) => (typeof p === 'string' ? p : p.text || '')).filter(Boolean);
+    if (sysTexts.length) parts.push(`[SYSTEM INSTRUCTION]\n${sysTexts.join('\n')}`);
+  }
+  if (Array.isArray(contents)) {
+    for (const turn of contents) {
+      const role = String(turn.role || 'user').toUpperCase();
+      const textParts = [];
+      for (const p of turn.parts || []) {
+        if (typeof p === 'string') textParts.push(p);
+        else if (p && p.text) textParts.push(p.text);
+        else if (p && p.inlineData) textParts.push(`[Attached Data: ${p.inlineData.mimeType || 'binary'}]`);
+        else if (p && p.functionCall) textParts.push(`[Tool Call: ${p.functionCall.name}(${JSON.stringify(p.functionCall.args || {})})]`);
+        else if (p && p.functionResponse) textParts.push(`[Tool Result: ${p.functionResponse.name} -> ${JSON.stringify(p.functionResponse.response || {})}]`);
+      }
+      if (textParts.length > 0) {
+        parts.push(`[${role}]\n${textParts.join('\n')}`);
+      }
+    }
   }
   return parts.join('\n\n');
 }
@@ -302,6 +400,204 @@ async function handleChatCompletions(req, res, bodyJson) {
   return sendError(res, 502, 'Failed to complete chat request after exhausting failover pool.', 'upstream_error');
 }
 
+async function handleCloudCodeGenerateContent(req, res, bodyJson, isStream = true) {
+  const modelName = bodyJson.model || 'gemini-4-argon';
+  let prompt = '';
+  if (Array.isArray(bodyJson.contents)) {
+    prompt = formatCloudCodeContentsToPrompt(bodyJson.contents, bodyJson.systemInstruction);
+  } else if (Array.isArray(bodyJson.messages)) {
+    prompt = formatMessagesToPrompt(bodyJson.messages);
+  } else if (typeof bodyJson.prompt === 'string') {
+    prompt = bodyJson.prompt;
+  }
+
+  if (!prompt.trim()) {
+    return sendError(res, 400, 'Cloud Code generateContent prompt/contents cannot be empty');
+  }
+
+  let account = pool.getActiveAccount();
+  if (!account) {
+    return sendError(
+      res,
+      429,
+      'All Google accounts in pool are currently exhausted or unavailable. Add a healthy account via geminUp menu.',
+      'quota_exhausted',
+    );
+  }
+
+  let attempts = 0;
+  const maxAttempts = Math.max(1, pool.accounts.length);
+
+  while (attempts < maxAttempts) {
+    attempts++;
+    try {
+      if (!account.session || !account.session.accessToken) {
+        await pool.refreshAccountSession(account);
+      }
+
+      const upstreamId = resolveModelUpstream(modelName, account);
+      const capacity = account.modelCapacity || 1;
+      const capacityField = account.modelCapacityField || 12;
+      const modelHeader = buildModelHeader(upstreamId, capacity, capacityField);
+
+      // Antigravity Agent Mode quota activation (action: 12)
+      const genReq = buildGenerateRequest(prompt, modelHeader, account.session, 200000 + attempts, {
+        agentMode: true,
+        action: 12,
+        temporary: true,
+      });
+
+      const targetUrl = `${BASE_URL}${GENERATE_PATH}?${genReq.params}`;
+      const upstreamRes = await doRequest(targetUrl, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+          'user-agent': USER_AGENT,
+          cookie: account.cookieString || pool.buildCookieHeader(account.cookies),
+          ...genReq.headers,
+        },
+        body: genReq.body.toString(),
+        agent: httpAgent,
+        timeoutMs: 60000,
+      });
+
+      pool.absorbSetCookies(account, upstreamRes.rawCookies);
+
+      if (upstreamRes.status === 429) {
+        throw { upstreamStatus: 429, upstreamCode: 1037, message: 'Gemini rate limited / quota exhausted' };
+      }
+
+      if (upstreamRes.status === 401 || upstreamRes.status === 403) {
+        throw { upstreamStatus: upstreamRes.status, upstreamCode: 1096, message: 'Gemini session authentication expired' };
+      }
+
+      if (upstreamRes.status >= 400) {
+        throw new Error(`Gemini upstream returned HTTP ${upstreamRes.status}`);
+      }
+
+      if (isStream) {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+          'Access-Control-Allow-Origin': '*',
+        });
+
+        let accumulatedContent = '';
+        let streamRemainder = '';
+
+        upstreamRes.body.on('data', (chunk) => {
+          streamRemainder += chunk.toString('utf8');
+          const { frames, remainder } = parseGoogleFrames(streamRemainder);
+          streamRemainder = remainder;
+
+          if (frames.length > 0) {
+            try {
+              const parsed = parseGeminiStream(frames);
+              if (parsed.content && parsed.content.length > accumulatedContent.length) {
+                const deltaText = parsed.content.slice(accumulatedContent.length);
+                accumulatedContent = parsed.content;
+
+                const ccDelta = {
+                  response: {
+                    candidates: [
+                      {
+                        content: {
+                          role: 'model',
+                          parts: [{ text: deltaText }],
+                        },
+                        finishReason: null,
+                      },
+                    ],
+                  },
+                };
+                res.write(`data: ${JSON.stringify(ccDelta)}\n\n`);
+              }
+            } catch (pErr) {
+              if (pErr.upstreamStatus === 429) {
+                pool.markExhausted(account.id);
+              }
+            }
+          }
+        });
+
+        upstreamRes.body.on('end', () => {
+          const finalCc = {
+            response: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+              usageMetadata: {
+                promptTokenCount: Math.round(prompt.length / 4),
+                candidatesTokenCount: Math.round(accumulatedContent.length / 4),
+                totalTokenCount: Math.round((prompt.length + accumulatedContent.length) / 4),
+              },
+            },
+          };
+          res.write(`data: ${JSON.stringify(finalCc)}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        });
+
+        upstreamRes.body.on('error', (err) => {
+          console.error(`[Argon Gateway] Cloud Code stream error: ${err.message}`);
+          res.end();
+        });
+
+        account.lastUsedAt = new Date().toISOString();
+        pool.save();
+        return;
+      }
+
+      const fullText = await upstreamRes.text();
+      const { frames } = parseGoogleFrames(fullText);
+      const parsed = parseGeminiStream(frames);
+
+      account.lastUsedAt = new Date().toISOString();
+      pool.save();
+
+      return sendJson(res, 200, {
+        response: {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: parsed.content || '' }],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+          usageMetadata: {
+            promptTokenCount: Math.round(prompt.length / 4),
+            candidatesTokenCount: Math.round((parsed.content || '').length / 4),
+            totalTokenCount: Math.round((prompt.length + (parsed.content || '').length) / 4),
+          },
+        },
+      });
+    } catch (err) {
+      console.warn(`[Argon Gateway] CC Attempt ${attempts} failed on account "${account.label}": ${err.message}`);
+      if (err.upstreamStatus === 429 || err.upstreamCode === 1037) {
+        pool.markExhausted(account.id);
+      } else if (err.upstreamCode === 1096 || err.upstreamStatus === 401) {
+        pool.markError(account.id, 'Session expired; re-auth required');
+      }
+
+      account = pool.getActiveAccount();
+      if (!account) {
+        return sendError(res, 429, 'All accounts exhausted during failover.', 'quota_exhausted');
+      }
+    }
+  }
+
+  return sendError(res, 502, 'Failed to complete Cloud Code generation after exhausting failover pool.', 'upstream_error');
+}
+
 // HTTP Server
 const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => {
   const parsedUrl = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
@@ -347,6 +643,71 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
     try {
       const body = await readBody();
       return await handleChatCompletions(req, res, body);
+    } catch (err) {
+      return sendError(res, 400, err.message);
+    }
+  }
+
+  // Antigravity Cloud Code Protocol: fetchAvailableModels
+  if ((req.method === 'GET' || req.method === 'POST') && (pathname === '/v1internal:fetchAvailableModels' || pathname.endsWith(':fetchAvailableModels'))) {
+    return sendJson(res, 200, CLOUD_CODE_CATALOG);
+  }
+
+  // Antigravity Cloud Code Protocol: loadCodeAssist
+  if (req.method === 'POST' && (pathname === '/v1internal:loadCodeAssist' || pathname.endsWith(':loadCodeAssist'))) {
+    return sendJson(res, 200, {
+      userTier: {
+        id: 'tier_enterprise_unlocked',
+        name: 'Antigravity Pro (geminUp Unlocked)',
+        description: 'Autonomous Agent Mode Enabled',
+      },
+      currentTier: 'tier_enterprise_unlocked',
+      ineligible: false,
+      allowedModelIds: [
+        'gemini-4-argon',
+        'gemini-4-argon-thinking-medium',
+        'gemini-3.8-flash',
+        'gemini-3.1-pro',
+        'claude-3-7-sonnet',
+      ],
+    });
+  }
+
+  // Antigravity Cloud Code Protocol: retrieveUserQuotaSummary / retrieveUserQuota
+  if (req.method === 'POST' && (pathname === '/v1internal:retrieveUserQuotaSummary' || pathname === '/v1internal:retrieveUserQuota' || pathname.includes(':retrieveUserQuota'))) {
+    return sendJson(res, 200, {
+      buckets: [
+        {
+          quotaType: 'QUOTA_TYPE_AGENT',
+          remainingFraction: 1.0,
+          resetTime: '2099-01-01T00:00:00Z',
+        },
+        {
+          quotaType: 'QUOTA_TYPE_CHAT',
+          remainingFraction: 1.0,
+          resetTime: '2099-01-01T00:00:00Z',
+        },
+      ],
+    });
+  }
+
+  // Antigravity Cloud Code Protocol: countTokens
+  if (req.method === 'POST' && (pathname === '/v1internal:countTokens' || pathname.endsWith(':countTokens'))) {
+    try {
+      const body = await readBody();
+      const promptLen = JSON.stringify(body).length;
+      return sendJson(res, 200, { totalTokens: Math.max(1, Math.round(promptLen / 4)) });
+    } catch {
+      return sendJson(res, 200, { totalTokens: 100 });
+    }
+  }
+
+  // Antigravity Cloud Code Protocol: streamGenerateContent / generateContent
+  if (req.method === 'POST' && (pathname === '/v1internal:streamGenerateContent' || pathname === '/v1internal:generateContent' || pathname.endsWith(':streamGenerateContent') || pathname.endsWith(':generateContent'))) {
+    try {
+      const body = await readBody();
+      const isStream = parsedUrl.searchParams.get('alt') === 'sse' || pathname.includes('streamGenerateContent');
+      return await handleCloudCodeGenerateContent(req, res, body, isStream);
     } catch (err) {
       return sendError(res, 400, err.message);
     }

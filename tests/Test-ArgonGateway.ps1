@@ -110,8 +110,37 @@ try {
         throw "Initial pool state mismatch"
     }
 
-    Write-Host "  OK: /health, /v1/models, and /admin/api/status responded successfully." -ForegroundColor Green
+    # Verify Antigravity Cloud Code endpoints & Model Unlocking
+    Write-Host '  Verifying Antigravity Cloud Code protocol endpoints...' -ForegroundColor DarkCyan
+    $ccModels = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/v1internal:fetchAvailableModels" -Method Get -TimeoutSec 2
+    if (-not $ccModels.models.'gemini-4-argon') {
+        throw "gemini-4-argon missing from Cloud Code models catalog"
+    }
+    if ($ccModels.models.'gemini-4-argon'.disabled -ne $false) {
+        throw "gemini-4-argon must be marked disabled: false"
+    }
+    if ($ccModels.models.'gemini-4-argon'.tagTitle -ne '') {
+        throw "gemini-4-argon tagTitle must be empty (unlocked)"
+    }
+
+    $assist = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/v1internal:loadCodeAssist" -Method Post -Body '{}' -ContentType 'application/json' -TimeoutSec 2
+    if ($assist.ineligible -ne $false) {
+        throw "loadCodeAssist must return ineligible: false"
+    }
+
+    $quota = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/v1internal:retrieveUserQuotaSummary" -Method Post -Body '{}' -ContentType 'application/json' -TimeoutSec 2
+    if ($quota.buckets.Count -eq 0) {
+        throw "retrieveUserQuotaSummary returned no buckets"
+    }
+
+    $tokens = Invoke-RestMethod -Uri "http://127.0.0.1:$testPort/v1internal:countTokens" -Method Post -Body '{"prompt":"hello world"}' -ContentType 'application/json' -TimeoutSec 2
+    if ($tokens.totalTokens -le 0) {
+        throw "countTokens failed"
+    }
+
+    Write-Host "  OK: /health, /v1/models, Cloud Code endpoints (/v1internal:*), and /admin/api/status responded successfully." -ForegroundColor Green
     Write-Host "  Available Models: $($modelIds -join ', ')" -ForegroundColor DarkGray
+    Write-Host "  Cloud Code Unlocked: gemini-4-argon (disabled=$($ccModels.models.'gemini-4-argon'.disabled), tagTitle='$($ccModels.models.'gemini-4-argon'.tagTitle)')" -ForegroundColor DarkGray
 }
 finally {
     $proc.Kill()
