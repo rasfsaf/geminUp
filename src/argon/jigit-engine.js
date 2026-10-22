@@ -193,30 +193,46 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial) {
 function runJigitPipeline(turnsList, options = {}) {
   if (!Array.isArray(turnsList) || turnsList.length === 0) return [];
   const totalTurns = turnsList.length;
-  const keepRecentTurns = options.keepRecentTurns || 4;
-  const maxPromptTurns = options.maxPromptTurns || 8;
+  const keepRecentTurns = options.keepRecentTurns || 10;
+  const maxPromptTurns = options.maxPromptTurns || 16;
 
   let selectedTurns = turnsList;
   if (totalTurns > maxPromptTurns) {
+    // 1. Always preserve Turn 0 (initial prompt / task intent)
     const initialTurns = turnsList.slice(0, 1);
-    const recentTurns = turnsList.slice(-keepRecentTurns);
-    const omittedCount = totalTurns - initialTurns.length - recentTurns.length;
 
-    const summaryMarker = {
-      role: 'user',
-      parts: [
-        {
-          text: `[JIGIT Engine: ${omittedCount} intermediate conversation turns compressed into background memory for low latency. Most recent state and initial request preserved.]`,
-        },
-      ],
-    };
-    selectedTurns = [...initialTurns, summaryMarker, ...recentTurns];
+    // 2. Find the index of the latest user turn so user instructions are NEVER sliced out
+    let lastUserIdx = -1;
+    for (let i = totalTurns - 1; i >= 0; i--) {
+      const r = String(turnsList[i]?.role || turnsList[i]?.author || '').toLowerCase();
+      if (r === 'user') {
+        lastUserIdx = i;
+        break;
+      }
+    }
+
+    // Keep all turns from the last user turn to the end, plus at least keepRecentTurns
+    const startRecentIdx = Math.max(1, Math.min(totalTurns - keepRecentTurns, lastUserIdx !== -1 ? lastUserIdx : totalTurns - keepRecentTurns));
+    const recentTurns = turnsList.slice(startRecentIdx);
+    const omittedCount = startRecentIdx - initialTurns.length;
+
+    if (omittedCount > 0) {
+      const summaryMarker = {
+        role: 'user',
+        parts: [
+          {
+            text: `[JIGIT Engine: ${omittedCount} intermediate conversation turns compressed into background memory for low latency. Most recent state and initial request preserved.]`,
+          },
+        ],
+      };
+      selectedTurns = [...initialTurns, summaryMarker, ...recentTurns];
+    }
   }
 
   const selTotal = selectedTurns.length;
   return selectedTurns.map((turn, index) => {
     const isInitial = index === 0;
-    const isRecent = index >= selTotal - 2;
+    const isRecent = index >= selTotal - 4;
     return optimizeTurnWithJigit(turn, isRecent, isInitial);
   });
 }
