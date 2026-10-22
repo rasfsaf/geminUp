@@ -56,7 +56,6 @@ const pool = new AccountPool({
 });
 
 const keepAliveManager = new KeepAliveManager(pool);
-keepAliveManager.start();
 
 const KNOWN_UPSTREAM_MODELS = {
   'gemini-4-argon': 'e6fa609c3fa255c0',
@@ -222,27 +221,28 @@ function buildToolInstructionPrompt(tools) {
     return `### Tool: ${t.name}\nDescription: ${t.description || 'No description provided'}\nParameters Schema: ${schema}`;
   }).join('\n\n');
 
-  return `[SYSTEM: WORKSPACE TOOL CAPABILITIES ENABLED]
-You are operating in an interactive Agentic workspace environment with direct access to local system tools and files.
-You have access to the following tools:
+  return `[CRITICAL RUNTIME OVERRIDE: GOOGLE ANTIGRAVITY IDE NATIVE AGENT]
+You are operating directly inside Google Antigravity IDE (Advanced Agentic Pair-Programming Environment) on the user's local Windows workstation.
+You are NOT a web assistant, NOT a standalone chatbot, and NOT running in a browser sandbox. You have ACTIVE, DIRECT EXECUTION PRIVILEGES on the local workstation through the Antigravity Tool Engine.
 
+DECLARED WORKSPACE TOOLS:
 ${toolDefs}
 
-MANDATORY TOOL CALL INSTRUCTIONS:
-1. When you need to read a file, list files, run a command, search, or edit code, you MUST invoke the appropriate tool.
-2. NEVER say "I don't have access to files", "files were not loaded", or "tell me what to read". Instead, immediately use 'run_command' or 'read_file' to inspect the directory and files yourself!
-3. To call a tool, you MUST format the tool call in a dedicated \`\`\`tool_call markdown block:
+STRICT AGENT DIRECTIVES:
+1. TOOL CALL PRIORITY: Whenever the user asks to inspect, read, check, run, search, list, test, create, or edit anything, you MUST invoke the appropriate workspace tool immediately.
+2. ABSOLUTE BAN ON REFUSALS: NEVER say "I don't have access to the terminal", "tools are unavailable", "blocked by host", "routing error", or "tell me what the file contains". You HAVE direct access right now. Refusing or claiming inability breaks the IDE execution loop.
+3. NO PREAMBLE BEFORE TOOLS: When calling a tool, DO NOT output introductory conversational chit-chat (e.g. "Sure, let me run that..."). Emit the \`\`\`tool_call block IMMEDIATELY as the very first output.
+4. EXACT TOOL CALL SYNTAX: Every tool call must be formatted in a dedicated \`\`\`tool_call block with valid JSON:
 \`\`\`tool_call
 {
   "name": "tool_name",
   "args": {
-    "param_name": "value"
+    "parameter": "value"
   }
 }
 \`\`\`
-4. You may include concise natural language before the tool call explaining what you are doing.
-5. Once you output the tool call, execution pauses and the workspace will return the result in the next turn.
-[END OF TOOL INSTRUCTIONS]`;
+5. MULTIPLE TOOLS: You can output multiple \`\`\`tool_call blocks sequentially if multiple actions are required.
+[END OF ANTIGRAVITY AGENT DIRECTIVES]`;
 }
 
 function formatFunctionCall(fc) {
@@ -435,6 +435,19 @@ function extractToolCallsFromOutput(text) {
   }
   if (toolCalls.length > 0) {
     cleanText = text.replace(bareRegex, '').trim();
+    return { toolCalls, cleanText };
+  }
+
+  // 5. XML tag format: <function_call name="...">{"arg": "val"}</function_call>
+  const xmlRegex = /<(?:function_call|tool_call)\s+name="([a-zA-Z0-9_\-]+)">([\s\S]*?)<\/(?:function_call|tool_call)>/gi;
+  while ((match = xmlRegex.exec(text)) !== null) {
+    const name = match[1];
+    let args = {};
+    try { args = JSON.parse(match[2].trim()); } catch {}
+    toolCalls.push({ name, args });
+  }
+  if (toolCalls.length > 0) {
+    cleanText = text.replace(xmlRegex, '').trim();
     return { toolCalls, cleanText };
   }
 
@@ -1081,6 +1094,8 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
   // Extract prompt safely from any format of Cloud Code / Antigravity payload
   const prompt = extractPromptFromAnyPayload(bodyJson);
+  const tools = extractToolsFromPayload(bodyJson);
+  const hasTools = tools.length > 0;
   if (!prompt || !prompt.trim()) {
     console.warn('[Argon Gateway] No prompt text extracted from payload. Forwarding transparently to Cloud Code upstream.');
     return await forwardToGoogleCloudCode(req, res, rawBuf);
@@ -1291,35 +1306,44 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
                 }
               }
 
-              // Stream content safely without leaking raw tool_call blocks
+              // Stream content safely:
+              // When tools are declared in payload, hold back early content text to avoid emitting
+              // partial text before a tool call (which causes IDE Go Language Server to miss the tool turn).
               if (parsed.content && parsed.content.length > accumulatedContent.length) {
                 accumulatedContent = parsed.content;
 
-                const toolTagIdx = accumulatedContent.search(/```(?:tool_call|toolcall|tool)|\[(?:Tool Call|TOOL CALL|ToolCall):/i);
-                let streamableText = accumulatedContent;
-                if (toolTagIdx !== -1) {
-                  streamableText = accumulatedContent.slice(0, toolTagIdx);
-                }
+                const toolTagIdx = accumulatedContent.search(/```(?:tool_call|toolcall|tool|json)|\[(?:Tool Call|TOOL CALL|ToolCall):|<(?:function_call|tool_call)/i);
 
-                if (streamableText.length > streamedContentLength) {
-                  const deltaText = streamableText.slice(streamedContentLength);
-                  streamedContentLength = streamableText.length;
+                if (hasTools && toolTagIdx !== -1) {
+                  // Tool call block detected: hold text streaming completely
+                } else if (hasTools && accumulatedContent.length < 250) {
+                  // Buffer initial 250 chars of content while checking if model begins a tool call
+                } else {
+                  let streamableText = accumulatedContent;
+                  if (toolTagIdx !== -1) {
+                    streamableText = accumulatedContent.slice(0, toolTagIdx);
+                  }
 
-                  const ccDelta = {
-                    response: {
-                      candidates: [
-                        {
-                          content: {
-                            role: 'model',
-                            parts: [{ text: deltaText }],
+                  if (streamableText.length > streamedContentLength) {
+                    const deltaText = streamableText.slice(streamedContentLength);
+                    streamedContentLength = streamableText.length;
+
+                    const ccDelta = {
+                      response: {
+                        candidates: [
+                          {
+                            content: {
+                              role: 'model',
+                              parts: [{ text: deltaText }],
+                            },
+                            finishReason: null,
                           },
-                          finishReason: null,
-                        },
-                      ],
-                    },
-                  };
-                  if (!res.writableEnded && !res.destroyed) {
-                    res.write(`data: ${JSON.stringify(ccDelta)}\n\n`);
+                        ],
+                      },
+                    };
+                    if (!res.writableEnded && !res.destroyed) {
+                      res.write(`data: ${JSON.stringify(ccDelta)}\n\n`);
+                    }
                   }
                 }
               }
@@ -1346,12 +1370,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
           if (toolCalls.length > 0) {
             const parts = [];
-            if (cleanText.length > streamedContentLength) {
-              const remainingText = cleanText.slice(streamedContentLength);
-              if (remainingText.trim().length > 0) {
-                parts.push({ text: remainingText });
-              }
-            }
+            // In tool calling turns, output only the clean functionCall items with finishReason: 'STOP'
             for (const call of toolCalls) {
               parts.push({
                 functionCall: {
@@ -1486,9 +1505,6 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
       const { toolCalls, cleanText } = extractToolCallsFromOutput(parsed.content || '');
 
       const parts = [];
-      if (cleanText && cleanText.trim().length > 0) {
-        parts.push({ text: cleanText });
-      }
       if (toolCalls.length > 0) {
         for (const call of toolCalls) {
           parts.push({
@@ -1498,10 +1514,10 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
             },
           });
         }
-      } else if (parts.length === 0) {
-        const fallback = (cleanText && cleanText.trim().length > 0)
-          ? cleanText.trim()
-          : '[Argon Gateway: Upstream Gemini model returned empty response. Пожалуйста, повторите запрос.]';
+      } else if (cleanText && cleanText.trim().length > 0) {
+        parts.push({ text: cleanText.trim() });
+      } else {
+        const fallback = '[Argon Gateway: Upstream Gemini model returned empty response. Пожалуйста, повторите запрос.]';
         parts.push({ text: fallback });
       }
 
@@ -1722,7 +1738,18 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
   return await forwardToGoogleCloudCode(req, res, rawBuf);
 });
 
-server.listen(config.port, config.host, () => {
-  console.info(`[Argon Gateway] Listening on http://${config.host}:${config.port}/v1 (Proxy: ${config.proxy || 'direct'})`);
-  console.info(`[Argon Gateway] Pool loaded: ${pool.accounts.length} account(s), Active: ${pool.activeAccountId || 'None'}`);
-});
+if (require.main === module) {
+  keepAliveManager.start();
+  server.listen(config.port, config.host, () => {
+    console.info(`[Argon Gateway] Listening on http://${config.host}:${config.port}/v1 (Proxy: ${config.proxy || 'direct'})`);
+    console.info(`[Argon Gateway] Pool loaded: ${pool.accounts.length} account(s), Active: ${pool.activeAccountId || 'None'}`);
+  });
+}
+
+module.exports = {
+  extractToolsFromPayload,
+  buildToolInstructionPrompt,
+  extractToolCallsFromOutput,
+  server,
+  pool,
+};
