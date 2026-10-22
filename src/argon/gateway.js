@@ -1077,9 +1077,11 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
   const isDedicatedFlash = rawModel.includes('gemini-3.8-flash') || rawModel.includes('ultra-quota');
   const isGlobalFlashRedirect = redirectConfig.redirectFlashToPool && rawModel.includes('flash');
   const isFlash = isDedicatedFlash || isGlobalFlashRedirect;
-  const isTargeted = isArgon || (isSonnet && redirectConfig.enabled) || isFlash;
 
-  // If redirect is disabled or this model is not targeted for pool routing, pass through to Google Cloud Code
+  // STRICT DEFAULT: Claude Sonnet is ALWAYS intercepted to Gemini 4 Argon Ultra-Quota when Argon is active.
+  const isTargeted = isArgon || isSonnet || isFlash;
+
+  // If this model is not targeted for pool routing, pass through to Google Cloud Code
   if (!isTargeted) {
     return await forwardToGoogleCloudCode(req, res, rawBuf);
   }
@@ -1124,14 +1126,16 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
             {
               content: {
                 role: 'model',
-                parts: [{ text: `⚠️ **[geminUp Argon Gateway]**\n\n${message}` }],
+                parts: [{ text: `\n\n⚠️ **[geminUp Argon Gateway]**\n\n${message}` }],
               },
               finishReason: 'STOP',
             },
           ],
         },
       };
-      res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
+      if (!res.writableEnded && !res.destroyed) {
+        res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
+      }
       res.end();
       return;
     }
@@ -1154,18 +1158,51 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
   if (!account) {
     if (isSonnet || isArgon || redirectConfig.failClosed) {
       const msg = isSonnet
-        ? 'Claude Sonnet перенаправлен на Gemini 4 Argon, но все Google-аккаунты в пуле Ultra-Quota сейчас недоступны или их сессии истекли.\n\n🔒 **Сработала защита Fail-Closed**, чтобы предотвратить расход вашей реальной квоты Claude Sonnet в IDE.\n\nПожалуйста, обновите сессию аккаунтов в пуле через `.\\geminUp.ps1 -Action argon-cookie`.'
-        : 'Все Google-аккаунты в пуле Ultra-Quota сейчас недоступны или их сессии истекли. Пожалуйста, обновите сессию через `.\\geminUp.ps1 -Action argon-cookie`.';
+        ? 'Claude Sonnet перенаправлен на Gemini 4 Argon, но все Google-аккаунты в пуле Ultra-Quota сейчас исчерпаны или требуют обновления.\n\nВключен **режим Fail-Closed**, чтобы предотвратить случайный расход квоты Claude Sonnet в IDE.\n\nОбнови куки через: .\\geminUp.ps1 -Action argon-cookie'
+        : 'Все Google-аккаунты в пуле Ultra-Quota сейчас исчерпаны или требуют обновления. Обнови куки через: .\\geminUp.ps1 -Action argon-cookie';
       return sendCloudCodeError(429, msg);
     }
     return await forwardToGoogleCloudCode(req, res, rawBuf);
   }
 
   let attempts = 0;
-  const maxAttempts = Math.max(1, pool.accounts.length);
+  const maxAttempts = Math.max(3, pool.accounts.length * 2);
+
+  // Client connection tracking
+  let clientAborted = false;
+  let activeUpstreamRes = null;
+
+  req.on('close', () => {
+    clientAborted = true;
+    if (activeUpstreamRes && activeUpstreamRes.body && typeof activeUpstreamRes.body.destroy === 'function') {
+      try { activeUpstreamRes.body.destroy(); } catch { }
+    }
+  });
+
+  // Track if SSE headers were emitted to client
+  let sseHeadersSent = false;
+  const ensureSseHeaders = () => {
+    if (!sseHeadersSent && isStream && !res.headersSent) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+      });
+      sseHeadersSent = true;
+    }
+  };
+
+  let accumulatedContent = '';
+  let accumulatedThoughts = '';
+  let streamedContentLength = 0;
 
   while (attempts < maxAttempts) {
     attempts++;
+    if (clientAborted || res.writableEnded || res.destroyed) {
+      return;
+    }
+
     try {
       if (!account.session || !account.session.accessToken) {
         await pool.refreshAccountSession(account);
@@ -1197,6 +1234,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         timeoutMs: 300000,
       });
 
+      activeUpstreamRes = upstreamRes;
       pool.absorbSetCookies(account, upstreamRes.rawCookies);
 
       if (upstreamRes.status === 429) {
@@ -1253,251 +1291,241 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
       pool.save();
 
       if (isStream) {
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream; charset=utf-8',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-          'Access-Control-Allow-Origin': '*',
-        });
+        ensureSseHeaders();
 
-        let accumulatedContent = '';
-        let accumulatedThoughts = '';
         let streamRemainder = '';
-        let streamedContentLength = 0;
         let streamError = null;
+        let streamFinishedCleanly = false;
 
-        // Handle client connection closing prematurely
-        req.on('close', () => {
-          if (upstreamRes && upstreamRes.body && typeof upstreamRes.body.destroy === 'function') {
-            upstreamRes.body.destroy();
-          }
-        });
+        const streamResult = await new Promise((resolve) => {
+          upstreamRes.body.on('data', (chunk) => {
+            if (clientAborted || res.writableEnded || res.destroyed) return;
+            streamRemainder += chunk.toString('utf8');
+            const { frames, remainder } = parseGoogleFrames(streamRemainder);
+            streamRemainder = remainder;
 
-        upstreamRes.body.on('data', (chunk) => {
-          if (res.writableEnded || res.destroyed) return;
-          streamRemainder += chunk.toString('utf8');
-          const { frames, remainder } = parseGoogleFrames(streamRemainder);
-          streamRemainder = remainder;
+            if (frames.length > 0) {
+              try {
+                const parsed = parseGeminiStream(frames);
 
-          if (frames.length > 0) {
-            try {
-              const parsed = parseGeminiStream(frames);
-
-              // Stream thoughts immediately to eliminate initial TTFT waiting
-              if (parsed.thoughts && parsed.thoughts.length > accumulatedThoughts.length) {
-                const deltaThoughts = parsed.thoughts.slice(accumulatedThoughts.length);
-                accumulatedThoughts = parsed.thoughts;
-                const thoughtDelta = {
-                  response: {
-                    candidates: [
-                      {
-                        content: {
-                          role: 'model',
-                          parts: [{ text: deltaThoughts, thought: true }],
-                        },
-                        finishReason: null,
-                      },
-                    ],
-                  },
-                };
-                if (!res.writableEnded && !res.destroyed) {
-                  res.write(`data: ${JSON.stringify(thoughtDelta)}\n\n`);
-                }
-              }
-
-              // Stream content safely:
-              // When tools are declared in payload, hold back early content text to avoid emitting
-              // partial text before a tool call (which causes IDE Go Language Server to miss the tool turn).
-              if (parsed.content && parsed.content.length > accumulatedContent.length) {
-                accumulatedContent = parsed.content;
-
-                const toolTagIdx = accumulatedContent.search(/```(?:tool_call|toolcall|tool|json)|\[(?:Tool Call|TOOL CALL|ToolCall):|<(?:function_call|tool_call)/i);
-
-                if (hasTools && toolTagIdx !== -1) {
-                  // Tool call block detected: hold text streaming completely
-                } else if (hasTools && accumulatedContent.length < 250) {
-                  // Buffer initial 250 chars of content while checking if model begins a tool call
-                } else {
-                  let streamableText = accumulatedContent;
-                  if (toolTagIdx !== -1) {
-                    streamableText = accumulatedContent.slice(0, toolTagIdx);
-                  }
-
-                  if (streamableText.length > streamedContentLength) {
-                    const deltaText = streamableText.slice(streamedContentLength);
-                    streamedContentLength = streamableText.length;
-
-                    const ccDelta = {
-                      response: {
-                        candidates: [
-                          {
-                            content: {
-                              role: 'model',
-                              parts: [{ text: deltaText }],
-                            },
-                            finishReason: null,
+                // Stream thoughts immediately to eliminate initial TTFT waiting
+                if (parsed.thoughts && parsed.thoughts.length > accumulatedThoughts.length) {
+                  const deltaThoughts = parsed.thoughts.slice(accumulatedThoughts.length);
+                  accumulatedThoughts = parsed.thoughts;
+                  const thoughtDelta = {
+                    response: {
+                      candidates: [
+                        {
+                          content: {
+                            role: 'model',
+                            parts: [{ text: deltaThoughts, thought: true }],
                           },
-                        ],
-                      },
-                    };
-                    if (!res.writableEnded && !res.destroyed) {
-                      res.write(`data: ${JSON.stringify(ccDelta)}\n\n`);
+                          finishReason: null,
+                        },
+                      ],
+                    },
+                  };
+                  if (!res.writableEnded && !res.destroyed) {
+                    res.write(`data: ${JSON.stringify(thoughtDelta)}\n\n`);
+                  }
+                }
+
+                // Stream content safely:
+                // When tools are declared in payload, hold back early content text to avoid emitting
+                // partial text before a tool call (which causes IDE Go Language Server to miss the tool turn).
+                if (parsed.content && parsed.content.length > accumulatedContent.length) {
+                  accumulatedContent = parsed.content;
+
+                  const toolTagIdx = accumulatedContent.search(/```(?:tool_call|toolcall|tool|json)|\[(?:Tool Call|TOOL CALL|ToolCall):|<(?:function_call|tool_call)/i);
+
+                  if (hasTools && toolTagIdx !== -1) {
+                    // Tool call block detected: hold text streaming completely
+                  } else if (hasTools && accumulatedContent.length < 250) {
+                    // Buffer initial 250 chars of content while checking if model begins a tool call
+                  } else {
+                    let streamableText = accumulatedContent;
+                    if (toolTagIdx !== -1) {
+                      streamableText = accumulatedContent.slice(0, toolTagIdx);
+                    }
+
+                    if (streamableText.length > streamedContentLength) {
+                      const deltaText = streamableText.slice(streamedContentLength);
+                      streamedContentLength = streamableText.length;
+
+                      const ccDelta = {
+                        response: {
+                          candidates: [
+                            {
+                              content: {
+                                role: 'model',
+                                parts: [{ text: deltaText }],
+                              },
+                              finishReason: null,
+                            },
+                          ],
+                        },
+                      };
+                      if (!res.writableEnded && !res.destroyed) {
+                        res.write(`data: ${JSON.stringify(ccDelta)}\n\n`);
+                      }
                     }
                   }
                 }
-              }
-            } catch (pErr) {
-              streamError = pErr;
-              console.error(`[Argon Gateway] Upstream stream frame error on account "${account.label}": ${pErr.message}`);
-              if (pErr.upstreamStatus === 429) {
-                pool.markExhausted(account.id);
+              } catch (pErr) {
+                streamError = pErr;
+                console.error(`[Argon Gateway] Upstream stream frame error on account "${account.label}": ${pErr.message}`);
+                if (pErr.upstreamStatus === 429) {
+                  pool.markExhausted(account.id);
+                }
               }
             }
-          }
+          });
+
+          upstreamRes.body.on('end', () => {
+            streamFinishedCleanly = true;
+            resolve({ ok: true });
+          });
+
+          upstreamRes.body.on('error', (err) => {
+            console.warn(`[Argon Gateway] Upstream stream event: ${err.message}`);
+            resolve({ ok: false, error: err });
+          });
         });
 
-        upstreamRes.body.on('end', () => {
-          if (res.writableEnded || res.destroyed) return;
+        if (clientAborted || res.writableEnded || res.destroyed) {
+          return;
+        }
 
-          let { toolCalls, cleanText } = extractToolCallsFromOutput(accumulatedContent);
-          if (toolCalls.length === 0 && accumulatedThoughts) {
-            const thoughtToolCheck = extractToolCallsFromOutput(accumulatedThoughts);
-            if (thoughtToolCheck.toolCalls.length > 0) {
-              toolCalls = thoughtToolCheck.toolCalls;
-            }
+        // If upstream aborted or failed prematurely and we haven't emitted any content yet, attempt reconnect
+        if (!streamResult.ok) {
+          const errMsg = streamResult.error?.message || '';
+          if (streamedContentLength === 0 && accumulatedContent.length === 0 && attempts < maxAttempts) {
+            console.warn(`[Argon Gateway] Upstream stream disconnected before data (${errMsg}). Reconnecting seamlessly (Attempt ${attempts}/${maxAttempts})...`);
+            account = pool.getActiveAccount() || account;
+            continue;
           }
+        }
 
-          if (toolCalls.length > 0) {
-            const parts = [];
-            // In tool calling turns, output only the clean functionCall items with finishReason: 'STOP'
-            for (const call of toolCalls) {
-              parts.push({
-                functionCall: {
-                  name: call.name,
-                  args: call.args,
-                },
-              });
-            }
+        // If we reached here, finish the response
+        let { toolCalls, cleanText } = extractToolCallsFromOutput(accumulatedContent);
+        if (toolCalls.length === 0 && accumulatedThoughts) {
+          const thoughtToolCheck = extractToolCallsFromOutput(accumulatedThoughts);
+          if (thoughtToolCheck.toolCalls.length > 0) {
+            toolCalls = thoughtToolCheck.toolCalls;
+          }
+        }
 
-            const toolCc = {
-              response: {
-                candidates: [
-                  {
-                    content: {
-                      role: 'model',
-                      parts,
-                    },
-                    finishReason: 'STOP',
-                  },
-                ],
-                usageMetadata: {
-                  promptTokenCount: Math.round(prompt.length / 4),
-                  candidatesTokenCount: Math.round(accumulatedContent.length / 4),
-                  totalTokenCount: Math.round((prompt.length + accumulatedContent.length) / 4),
-                },
+        if (toolCalls.length > 0) {
+          const parts = [];
+          for (const call of toolCalls) {
+            parts.push({
+              functionCall: {
+                name: call.name,
+                args: call.args,
               },
-            };
-            res.write(`data: ${JSON.stringify(toolCc)}\n\n`);
-            res.end();
-            return;
+            });
           }
 
-          if (accumulatedContent.length > streamedContentLength) {
-            const remainingText = accumulatedContent.slice(streamedContentLength);
-            if (remainingText.trim().length > 0) {
-              const textChunk = {
-                response: {
-                  candidates: [
-                    {
-                      content: {
-                        role: 'model',
-                        parts: [{ text: remainingText }],
-                      },
-                      finishReason: null,
-                    },
-                  ],
-                },
-              };
-              res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
-              streamedContentLength += remainingText.length;
-            }
-          }
-
-          // Safety guarantee: If no text was streamed and no tool calls, emit informative diagnostic text so candidate text is never empty
-          if (streamedContentLength === 0) {
-            let fallbackText = '';
-            if (cleanText && cleanText.trim().length > 0) {
-              fallbackText = cleanText.trim();
-            } else if (streamError) {
-              fallbackText = `[Argon Gateway Upstream Error: ${streamError.message} (Account: ${account.label}). Пожалуйста, проверьте статус аккаунта в пуле или повторите запрос.]`;
-            } else {
-              fallbackText = '[Argon Gateway: Upstream Gemini model completed without generating output text. Пожалуйста, повторите запрос.]';
-            }
-            const textChunk = {
-              response: {
-                candidates: [
-                  {
-                    content: {
-                      role: 'model',
-                      parts: [{ text: fallbackText }],
-                    },
-                    finishReason: null,
-                  },
-                ],
-              },
-            };
-            res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
-            streamedContentLength += fallbackText.length;
-          }
-
-          const finalCc = {
+          const toolCc = {
             response: {
               candidates: [
                 {
                   content: {
                     role: 'model',
-                    parts: [{ text: '' }],
+                    parts,
                   },
                   finishReason: 'STOP',
                 },
               ],
               usageMetadata: {
                 promptTokenCount: Math.round(prompt.length / 4),
-                candidatesTokenCount: Math.max(1, Math.round(accumulatedContent.length / 4)),
-                totalTokenCount: Math.round((prompt.length + Math.max(1, accumulatedContent.length)) / 4),
+                candidatesTokenCount: Math.round(accumulatedContent.length / 4),
+                totalTokenCount: Math.round((prompt.length + accumulatedContent.length) / 4),
               },
             },
           };
-          res.write(`data: ${JSON.stringify(finalCc)}\n\n`);
-          // Note: In Google Cloud Code protocol, SSE streams terminate with finishReason: 'STOP' and connection close.
-          // Strictly DO NOT send 'data: [DONE]' because Go's Protobuf parser treats it as an invalid proto token '['.
-          res.end();
-        });
-
-        upstreamRes.body.on('error', (err) => {
-          console.error(`[Argon Gateway] Cloud Code stream error: ${err.message}`);
           if (!res.writableEnded && !res.destroyed) {
-            const errChunk = {
+            res.write(`data: ${JSON.stringify(toolCc)}\n\n`);
+          }
+          res.end();
+          return;
+        }
+
+        if (accumulatedContent.length > streamedContentLength) {
+          const remainingText = accumulatedContent.slice(streamedContentLength);
+          if (remainingText.trim().length > 0) {
+            const textChunk = {
               response: {
                 candidates: [
                   {
                     content: {
                       role: 'model',
-                      parts: [{ text: `\n\n⚠️ **[geminUp Argon Gateway Stream Error]**: ${err.message}` }],
+                      parts: [{ text: remainingText }],
                     },
-                    finishReason: 'STOP',
+                    finishReason: null,
                   },
                 ],
               },
             };
-            try { res.write(`data: ${JSON.stringify(errChunk)}\n\n`); } catch { }
-            res.end();
+            if (!res.writableEnded && !res.destroyed) {
+              res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+            }
+            streamedContentLength += remainingText.length;
           }
-        });
+        }
 
+        if (streamedContentLength === 0) {
+          let fallbackText = '';
+          if (cleanText && cleanText.trim().length > 0) {
+            fallbackText = cleanText.trim();
+          } else {
+            fallbackText = '[Argon Gateway: Upstream Gemini model completed without generating output text.]';
+          }
+          const textChunk = {
+            response: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: fallbackText }],
+                  },
+                  finishReason: null,
+                },
+              ],
+            },
+          };
+          if (!res.writableEnded && !res.destroyed) {
+            res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+          }
+          streamedContentLength += fallbackText.length;
+        }
+
+        const finalCc = {
+          response: {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ text: '' }],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+            usageMetadata: {
+              promptTokenCount: Math.round(prompt.length / 4),
+              candidatesTokenCount: Math.max(1, Math.round(accumulatedContent.length / 4)),
+              totalTokenCount: Math.round((prompt.length + Math.max(1, accumulatedContent.length)) / 4),
+            },
+          },
+        };
+        if (!res.writableEnded && !res.destroyed) {
+          res.write(`data: ${JSON.stringify(finalCc)}\n\n`);
+        }
+        res.end();
         return;
       }
 
+      // Non-streaming response collection
       const fullText = await upstreamRes.text();
       const { frames } = parseGoogleFrames(fullText);
       const parsed = parseGeminiStream(frames);
@@ -1516,7 +1544,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
       } else if (cleanText && cleanText.trim().length > 0) {
         parts.push({ text: cleanText.trim() });
       } else {
-        const fallback = '[Argon Gateway: Upstream Gemini model returned empty response. Пожалуйста, повторите запрос.]';
+        const fallback = '[Argon Gateway: Upstream Gemini model returned empty response.]';
         parts.push({ text: fallback });
       }
 
@@ -1550,8 +1578,8 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
       if (!account) {
         if (isSonnet || isArgon || redirectConfig.failClosed) {
           const msg = isSonnet
-            ? 'Все Google-аккаунты в пуле Ultra-Quota исчерпали квоту или их сессии истекли во время переключения.\n\n🔒 **Сработала защита Fail-Closed**: запрос заблокирован для защиты вашей реальной квоты Claude Sonnet. Пожалуйста, обновите сессии через `.\\geminUp.ps1 -Action argon-cookie`.'
-            : 'Все аккаунты в пуле geminUp исчерпаны во время переключения. Пожалуйста, обновите сессии или проверьте статус пула.';
+            ? 'Все Google-аккаунты в пуле Ultra-Quota исчерпаны или требуют обновления.\n\nВключен режим Fail-Closed: Claude Sonnet заблокирован от списания квоты. Обнови куки через: .\\geminUp.ps1 -Action argon-cookie'
+            : 'Все аккаунты в пуле geminUp исчерпаны. Обнови куки в меню.';
           return sendCloudCodeError(429, msg);
         }
         return await forwardToGoogleCloudCode(req, res, rawBuf);
@@ -1561,7 +1589,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
   return sendCloudCodeError(
     502,
-    'Не удалось выполнить генерацию ответа после опроса всех аккаунтов в пуле Ultra-Quota. Защита Fail-Closed активна.'
+    'Не удалось получить ответ от Ultra-Quota пула. Режим Fail-Closed активен.'
   );
 }
 
