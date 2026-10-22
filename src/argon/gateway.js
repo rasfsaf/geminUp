@@ -308,39 +308,89 @@ Instruction: The user has attached an image or screenshot saved at '${posixPath}
   }
 }
 
-function optimizeConversationTurns(turnsList, maxTurnToolResultChars = 1500, keepFullRecentTurns = 3) {
+function optimizeConversationTurns(turnsList, maxTurnToolResultChars = 1200, keepFullRecentTurns = 4, maxTotalPromptTurns = 8) {
   if (!Array.isArray(turnsList) || turnsList.length === 0) return [];
   const totalTurns = turnsList.length;
 
-  return turnsList.map((turn, index) => {
-    const isRecent = index >= totalTurns - keepFullRecentTurns;
-    if (isRecent || !turn || !Array.isArray(turn.parts)) return turn;
+  let selectedTurns = turnsList;
+  if (totalTurns > maxTotalPromptTurns) {
+    // Keep initial 1 turn (the original user goal/task statement)
+    const initialTurns = turnsList.slice(0, 1);
+    // Keep the most recent turns
+    const recentTurns = turnsList.slice(-keepFullRecentTurns);
+    const omittedCount = totalTurns - initialTurns.length - recentTurns.length;
+
+    const summaryMarker = {
+      role: 'user',
+      parts: [
+        {
+          text: `[Context Note: ${omittedCount} intermediate conversation turns omitted for performance and low latency. Most recent state and initial request preserved below.]`,
+        },
+      ],
+    };
+    selectedTurns = [...initialTurns, summaryMarker, ...recentTurns];
+  }
+
+  const selTotal = selectedTurns.length;
+  return selectedTurns.map((turn, index) => {
+    if (!turn) return turn;
+    const isRecent = index >= selTotal - 2; // only the last 2 turns are completely unconstrained
+    if (typeof turn === 'string') {
+      if (!isRecent && turn.length > 2000) {
+        return turn.slice(0, 1000) + '\n\n[... Truncated for latency ...]\n\n' + turn.slice(-500);
+      }
+      return turn;
+    }
+    if (!Array.isArray(turn.parts)) return turn;
 
     const condensedParts = turn.parts.map((part) => {
-      if (part && part.functionResponse) {
+      if (!part) return part;
+      // Truncate functionResponse output
+      if (part.functionResponse) {
         const fr = part.functionResponse;
         const resp = fr.response;
-        if (resp && typeof resp.output === 'string' && resp.output.length > maxTurnToolResultChars) {
-          const head = resp.output.slice(0, 600);
-          const tail = resp.output.slice(-400);
-          const omitted = resp.output.length - 1000;
+        const charLimit = isRecent ? 2500 : maxTurnToolResultChars;
+        if (resp && typeof resp.output === 'string' && resp.output.length > charLimit) {
+          const head = resp.output.slice(0, Math.round(charLimit * 0.6));
+          const tail = resp.output.slice(-Math.round(charLimit * 0.4));
+          const omitted = resp.output.length - (head.length + tail.length);
           return {
             ...part,
             functionResponse: {
               ...fr,
               response: {
                 ...resp,
-                output: `${head}\n\n[... Older tool output truncated: ${omitted} characters omitted for context efficiency ...]\n\n${tail}`,
+                output: `${head}\n\n[... Older tool output truncated: ${omitted} chars omitted for latency ...]\n\n${tail}`,
               },
             },
           };
         }
+      }
+      // Truncate very long older text parts
+      if (!isRecent && typeof part.text === 'string' && part.text.length > 2000) {
+        const head = part.text.slice(0, 1000);
+        const tail = part.text.slice(-500);
+        const omitted = part.text.length - 1500;
+        return {
+          ...part,
+          text: `${head}\n\n[... Older message truncated: ${omitted} chars omitted for latency ...]\n\n${tail}`,
+        };
       }
       return part;
     });
 
     return { ...turn, parts: condensedParts };
   });
+}
+
+function enforcePromptBudget(promptText, maxChars = 35000) {
+  if (!promptText || promptText.length <= maxChars) return promptText;
+  const headSize = Math.round(maxChars * 0.3);
+  const tailSize = Math.round(maxChars * 0.7);
+  const head = promptText.slice(0, headSize);
+  const tail = promptText.slice(-tailSize);
+  const omitted = promptText.length - (headSize + tailSize);
+  return `${head}\n\n[... Context truncated: ${omitted} chars omitted for fast startup latency ...]\n\n${tail}`;
 }
 
 function payloadHasImages(bodyJson) {
@@ -465,7 +515,7 @@ function formatCloudCodeContentsToPrompt(contents, systemInstruction) {
     if (sysTexts.length) parts.push(`[SYSTEM INSTRUCTION]\n${sysTexts.join('\n')}`);
   }
   if (Array.isArray(contents)) {
-    const optimized = optimizeConversationTurns(contents, 1500, 3);
+    const optimized = optimizeConversationTurns(contents, 1200, 4, 8);
     for (const turn of optimized) {
       const role = String(turn.role || 'user').toUpperCase();
       const textParts = [];
@@ -483,12 +533,12 @@ function formatCloudCodeContentsToPrompt(contents, systemInstruction) {
       }
     }
   }
-  return parts.join('\n\n');
+  return enforcePromptBudget(parts.join('\n\n'));
 }
 
 function extractPromptFromAnyPayload(bodyJson) {
   if (!bodyJson) return '';
-  if (typeof bodyJson === 'string') return bodyJson;
+  if (typeof bodyJson === 'string') return enforcePromptBudget(bodyJson);
 
   const req = bodyJson.request || bodyJson;
   const sysInst = req.systemInstruction || req.system_instruction || bodyJson.systemInstruction || bodyJson.system_instruction;
@@ -518,7 +568,7 @@ function extractPromptFromAnyPayload(bodyJson) {
 
   // Extract Contents / Turns with sliding window context optimization
   const rawTurnsList = Array.isArray(contents) ? contents : (contents && typeof contents === 'object' ? [contents] : (Array.isArray(turns) ? turns : null));
-  const turnsList = optimizeConversationTurns(rawTurnsList, 1500, 3);
+  const turnsList = optimizeConversationTurns(rawTurnsList, 1200, 4, 8);
   if (turnsList) {
     for (const turn of turnsList) {
       if (!turn) continue;
@@ -584,7 +634,7 @@ function extractPromptFromAnyPayload(bodyJson) {
   }
 
   if (parts.length > 0) {
-    return parts.join('\n\n');
+    return enforcePromptBudget(parts.join('\n\n'));
   }
 
   // Deep recursive extraction for any string property named 'text', 'content', 'query', or 'prompt'
@@ -689,7 +739,7 @@ async function handleChatCompletions(req, res, bodyJson) {
         },
         body: genReq.body.toString(),
         agent: httpAgent,
-        timeoutMs: 60000,
+        timeoutMs: 180000,
       });
 
       pool.absorbSetCookies(account, upstreamRes.rawCookies);
@@ -1154,7 +1204,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         },
         body: genReq.body.toString(),
         agent: httpAgent,
-        timeoutMs: 60000,
+        timeoutMs: 180000,
       });
 
       pool.absorbSetCookies(account, upstreamRes.rawCookies);
@@ -1307,7 +1357,13 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         upstreamRes.body.on('end', () => {
           if (res.writableEnded || res.destroyed) return;
 
-          const { toolCalls, cleanText } = extractToolCallsFromOutput(accumulatedContent);
+          let { toolCalls, cleanText } = extractToolCallsFromOutput(accumulatedContent);
+          if (toolCalls.length === 0 && accumulatedThoughts) {
+            const thoughtToolCheck = extractToolCallsFromOutput(accumulatedThoughts);
+            if (thoughtToolCheck.toolCalls.length > 0) {
+              toolCalls = thoughtToolCheck.toolCalls;
+            }
+          }
 
           if (toolCalls.length > 0) {
             const parts = [];
@@ -1351,13 +1407,37 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
           if (accumulatedContent.length > streamedContentLength) {
             const remainingText = accumulatedContent.slice(streamedContentLength);
+            if (remainingText.trim().length > 0) {
+              const textChunk = {
+                response: {
+                  candidates: [
+                    {
+                      content: {
+                        role: 'model',
+                        parts: [{ text: remainingText }],
+                      },
+                      finishReason: null,
+                    },
+                  ],
+                },
+              };
+              res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+              streamedContentLength += remainingText.length;
+            }
+          }
+
+          // Safety guarantee: If no text was streamed and no tool calls, emit clean fallback text so candidate text is never empty
+          if (streamedContentLength === 0) {
+            const fallbackText = (cleanText && cleanText.trim().length > 0)
+              ? cleanText.trim()
+              : 'Готово. Пожалуйста, продолжайте.';
             const textChunk = {
               response: {
                 candidates: [
                   {
                     content: {
                       role: 'model',
-                      parts: [{ text: remainingText }],
+                      parts: [{ text: fallbackText }],
                     },
                     finishReason: null,
                   },
@@ -1365,19 +1445,24 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
               },
             };
             res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+            streamedContentLength += fallbackText.length;
           }
 
           const finalCc = {
             response: {
               candidates: [
                 {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: '' }],
+                  },
                   finishReason: 'STOP',
                 },
               ],
               usageMetadata: {
                 promptTokenCount: Math.round(prompt.length / 4),
-                candidatesTokenCount: Math.round(accumulatedContent.length / 4),
-                totalTokenCount: Math.round((prompt.length + accumulatedContent.length) / 4),
+                candidatesTokenCount: Math.max(1, Math.round(accumulatedContent.length / 4)),
+                totalTokenCount: Math.round((prompt.length + Math.max(1, accumulatedContent.length)) / 4),
               },
             },
           };
@@ -1414,7 +1499,8 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
           });
         }
       } else if (parts.length === 0) {
-        parts.push({ text: parsed.content || '' });
+        const fallback = (cleanText && cleanText.trim().length > 0) ? cleanText.trim() : 'Готово. Пожалуйста, продолжайте.';
+        parts.push({ text: fallback });
       }
 
       return sendJson(res, 200, {

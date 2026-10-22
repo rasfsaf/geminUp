@@ -1217,21 +1217,24 @@ function Switch-AntigravityFlashRouting {
     Write-Host ''
 }
 
-function Switch-AntigravityArgonRouting {
-    $current = Get-SonnetRedirectState
-    $routingEnv = [Environment]::GetEnvironmentVariable('ARGON_ENDPOINT', 'User')
-    $currentlyActive = $current -or (-not [string]::IsNullOrWhiteSpace($routingEnv))
-    $newState = -not $currentlyActive
-    Set-SonnetRedirectState -Enabled $newState | Out-Null
+function Set-AntigravityArgonRouting {
+    param(
+        [Parameter(Mandatory = $true)]
+        [bool]$Enabled,
+        [switch]$Silent
+    )
 
+    Set-SonnetRedirectState -Enabled $Enabled | Out-Null
     $targetUrl = "http://127.0.0.1:$script:ArgonListenPort"
 
-    if ($newState) {
+    if ($Enabled) {
         # 1. Apply app.asar hook so process.env.ARGON_ENDPOINT is respected
         try {
             Invoke-AntigravityAsarPatch -Direction Apply | Out-Null
         } catch {
-            Write-Warning "Failed to patch app.asar: $($_.Exception.Message)"
+            if (-not $Silent) {
+                Write-Warning "Failed to patch app.asar: $($_.Exception.Message)"
+            }
         }
 
         # 2. Set environment variables
@@ -1241,23 +1244,28 @@ function Switch-AntigravityArgonRouting {
         # 3. Ensure Argon Gateway service is running
         $status = Get-ArgonBridgeStatus
         if (-not $status.Listening) {
-            Start-ArgonBridge
+            Start-ArgonBridge -SkipSonnetSync
         }
 
         # 4. Gently terminate running language_server.exe instances to apply new endpoint
         $runningLs = @(Get-Process -Name 'language_server' -ErrorAction SilentlyContinue)
         if ($runningLs.Count -gt 0) {
             $runningLs | Stop-Process -Force -ErrorAction SilentlyContinue
-            Write-Host '  Language server recycled to adopt local Ultra-Quota Gateway.' -ForegroundColor DarkCyan
+            if (-not $Silent) {
+                Write-Host '  Language server recycled to adopt local Ultra-Quota Gateway.' -ForegroundColor DarkCyan
+            }
         }
 
-        Write-Host ''
-        Write-TransportLog OK 'Claude Sonnet 4.6 -> Gemini 4 Argon Redirection: ENABLED (Fail-Closed mode).'
-        Write-Host '  When Claude Sonnet 4.6 is selected in Antigravity, requests are transparently' -ForegroundColor Green
-        Write-Host '  redirected to Gemini 4 Argon with Agent Mode quota (action: 12).' -ForegroundColor Green
-        Write-Host '  Gemini 3.8 Flash requests are also powered by the rotating account pool.' -ForegroundColor Green
-        Write-Host '  If accounts pool is exhausted, requests fail-closed without hitting Google Cloud.' -ForegroundColor Yellow
-        Write-Host '  Restart Antigravity IDE if model status does not update immediately.' -ForegroundColor Yellow
+        if (-not $Silent) {
+            Write-Host ''
+            Write-TransportLog OK 'Claude Sonnet 4.6 -> Gemini 4 Argon Redirection: ENABLED (Fail-Closed mode).'
+            Write-Host '  When Claude Sonnet 4.6 is selected in Antigravity, requests are transparently' -ForegroundColor Green
+            Write-Host '  redirected to Gemini 4 Argon with Agent Mode quota (action: 12).' -ForegroundColor Green
+            Write-Host '  Gemini 3.8 Flash requests are also powered by the rotating account pool.' -ForegroundColor Green
+            Write-Host '  If accounts pool is exhausted, requests fail-closed without hitting Google Cloud.' -ForegroundColor Yellow
+            Write-Host '  Restart Antigravity IDE if model status does not update immediately.' -ForegroundColor Yellow
+            Write-Host ''
+        }
     } else {
         # 1. Remove environment variables
         [Environment]::SetEnvironmentVariable('ARGON_ENDPOINT', $null, 'User')
@@ -1269,12 +1277,22 @@ function Switch-AntigravityArgonRouting {
             $runningLs | Stop-Process -Force -ErrorAction SilentlyContinue
         }
 
-        Write-Host ''
-        Write-TransportLog OK 'Claude Sonnet 4.6 -> Gemini 4 Argon Redirection: DISABLED.'
-        Write-Host '  Claude Sonnet and Gemini requests will go directly to Google Cloud backend.' -ForegroundColor White
-        Write-Host '  Restart Antigravity IDE to complete the switch.' -ForegroundColor Yellow
+        if (-not $Silent) {
+            Write-Host ''
+            Write-TransportLog OK 'Claude Sonnet 4.6 -> Gemini 4 Argon Redirection: DISABLED.'
+            Write-Host '  Claude Sonnet and Gemini requests will go directly to Google Cloud backend.' -ForegroundColor White
+            Write-Host '  Restart Antigravity IDE to complete the switch.' -ForegroundColor Yellow
+            Write-Host ''
+        }
     }
-    Write-Host ''
+}
+
+function Switch-AntigravityArgonRouting {
+    $current = Get-SonnetRedirectState
+    $routingEnv = [Environment]::GetEnvironmentVariable('ARGON_ENDPOINT', 'User')
+    $currentlyActive = $current -or (-not [string]::IsNullOrWhiteSpace($routingEnv))
+    $newState = -not $currentlyActive
+    Set-AntigravityArgonRouting -Enabled $newState
 }
 
 function Set-AntigravityShortcutRouting {
@@ -2121,6 +2139,7 @@ function Get-ArgonBridgeStatus {
 }
 
 function Start-ArgonBridge {
+    param([switch]$SkipSonnetSync)
     Assert-SupportedWindows
     Assert-Administrator
 
@@ -2204,10 +2223,15 @@ function Start-ArgonBridge {
 
     $status = Get-ArgonBridgeStatus
     Write-TransportLog OK "Argon Gateway started successfully as background service on http://127.0.0.1:$($script:ArgonListenPort)/v1 (PID: $($status.Pid))."
+
+    if (-not $SkipSonnetSync) {
+        Set-AntigravityArgonRouting -Enabled $true -Silent
+        Write-TransportLog OK 'Auto-enabled Claude Sonnet 4.6 -> Gemini 4 Argon redirection.'
+    }
 }
 
 function Stop-ArgonBridge {
-    param([switch]$Silent)
+    param([switch]$Silent, [switch]$SkipSonnetSync)
 
     try {
         Unregister-ScheduledTask -TaskName $script:ArgonTaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
@@ -2254,11 +2278,18 @@ function Stop-ArgonBridge {
         } catch { }
     }
 
+    if (-not $SkipSonnetSync) {
+        Set-AntigravityArgonRouting -Enabled $false -Silent
+    }
+
     if (-not $Silent) {
         if ($stoppedAny) {
             Write-TransportLog OK 'Argon Gateway process stopped.'
         } else {
             Write-TransportLog INFO 'Argon Gateway is not running.'
+        }
+        if (-not $SkipSonnetSync) {
+            Write-TransportLog OK 'Auto-disabled Claude Sonnet 4.6 -> Gemini 4 Argon redirection.'
         }
     }
 }
