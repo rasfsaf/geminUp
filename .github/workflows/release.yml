@@ -54,6 +54,7 @@ jobs:
           New-Item -ItemType Directory -Path (Join-Path $stage 'transport') -Force | Out-Null
           New-Item -ItemType Directory -Path (Join-Path $stage 'update') -Force | Out-Null
           Copy-Item geminUp.bat,geminUp-bootstrap.bat,geminUp.ps1,README.md,SECURITY.md,LICENSE -Destination $stage
+          Copy-Item src -Recurse -Destination $stage
           Copy-Item transport\GeminUp.cs,transport\domains.txt,transport\youtube-domains.txt -Destination (Join-Path $stage 'transport')
           Copy-Item update\GeminUp.Update.psm1 -Destination (Join-Path $stage 'update')
           Compress-Archive -Path $stage -DestinationPath artifacts\geminUp.zip -CompressionLevel Optimal
