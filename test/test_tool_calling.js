@@ -80,12 +80,48 @@ const resE = extractToolCallsFromOutput(textE);
 assert.strictEqual(resE.toolCalls.length, 1);
 assert.strictEqual(resE.toolCalls[0].name, 'run_command');
 assert.strictEqual(resE.toolCalls[0].args.CommandLine, 'dir');
-console.log('  -> PASS: Format E (XML <function_call>) successfully parsed.\n');
+console.log('  -> PASS: Format E (XML <function_call>) successfully parsed.');
+
+// Format F: Bare ``` fence with name & args
+const textF = '```\n{\n  "name": "write_file",\n  "args": { "Path": "index.js", "Content": "console.log(1);" }\n}\n```';
+const resF = extractToolCallsFromOutput(textF);
+assert.strictEqual(resF.toolCalls.length, 1);
+assert.strictEqual(resF.toolCalls[0].name, 'write_file');
+assert.strictEqual(resF.toolCalls[0].args.Path, 'index.js');
+console.log('  -> PASS: Format F (Bare ``` fence) successfully parsed.');
+
+// Format G: Direct function call tool_name({...})
+const textG = 'read_file({"Path": "README.md"})';
+const resG = extractToolCallsFromOutput(textG);
+assert.strictEqual(resG.toolCalls.length, 1);
+assert.strictEqual(resG.toolCalls[0].name, 'read_file');
+assert.strictEqual(resG.toolCalls[0].args.Path, 'README.md');
+console.log('  -> PASS: Format G (Direct invocation tool_name({...})) successfully parsed.');
+
+// Format H: ReAct format Action / Action Input
+const textH = 'Action: run_command\nAction Input: {"CommandLine": "git status"}';
+const resH = extractToolCallsFromOutput(textH);
+assert.strictEqual(resH.toolCalls.length, 1);
+assert.strictEqual(resH.toolCalls[0].name, 'run_command');
+assert.strictEqual(resH.toolCalls[0].args.CommandLine, 'git status');
+console.log('  -> PASS: Format H (ReAct Action / Action Input) successfully parsed.');
+
+// Format I: Preamble preservation (exact scenario user encountered)
+const textI = 'I will check the codebase and documentation to understand what the mod does.\n\nLet\'s read README.md or DOC.md first.\n\n```tool_call\n{\n  "name": "read_file",\n  "args": { "Path": "README.md" }\n}\n```';
+const resI = extractToolCallsFromOutput(textI);
+assert.strictEqual(resI.toolCalls.length, 1);
+assert.strictEqual(resI.toolCalls[0].name, 'read_file');
+assert(resI.cleanText.includes('I will check the codebase'), 'Must preserve preamble as cleanText');
+assert(!resI.cleanText.includes('```tool_call'), 'Must strip tool call block from cleanText');
+console.log('  -> PASS: Format I (Preamble preservation with cleanText) successfully parsed.\n');
 
 // 3. Test Antigravity IDE Protocol candidate output structure
 console.log('[Test 3] Cloud Code SSE Protocol candidate validation for IDE Tool Executor');
 const candidateParts = [];
-for (const call of resA.toolCalls) {
+if (resI.cleanText) {
+  candidateParts.push({ text: resI.cleanText, thought: true });
+}
+for (const call of resI.toolCalls) {
   candidateParts.push({
     functionCall: {
       name: call.name,
@@ -109,8 +145,30 @@ const mockCloudCodeCandidate = {
 };
 
 assert.strictEqual(mockCloudCodeCandidate.response.candidates[0].finishReason, 'STOP');
-assert(mockCloudCodeCandidate.response.candidates[0].content.parts[0].functionCall, 'Must contain functionCall object');
-assert.strictEqual(mockCloudCodeCandidate.response.candidates[0].content.parts[0].functionCall.name, 'run_command');
-console.log('  -> PASS: Antigravity IDE SSE payload matches Cloud Code Go Language Server specification.');
+assert.strictEqual(mockCloudCodeCandidate.response.candidates[0].content.parts[0].thought, true);
+assert(mockCloudCodeCandidate.response.candidates[0].content.parts[1].functionCall, 'Must contain functionCall object');
+assert.strictEqual(mockCloudCodeCandidate.response.candidates[0].content.parts[1].functionCall.name, 'read_file');
+console.log('  -> PASS: Antigravity IDE SSE payload contains thoughts and functionCall matching Cloud Code Go Language Server specification.');
 
-console.log('\n>>> ALL 3 TOOL USE TESTS PASSED SUCCESSFULLY! <<<');
+// 4. Test Turn Role formatting with functionResponse
+console.log('\n[Test 4] Turn Role formatting with functionResponse');
+const { extractPromptFromAnyPayload } = require('../src/argon/gateway');
+const mockPayload = {
+  request: {
+    contents: [
+      { role: 'user', parts: [{ text: 'Check the file' }] },
+      { role: 'model', parts: [{ functionCall: { name: 'read_file', args: { Path: 'README.md' } } }] },
+      { role: 'model', parts: [{ functionResponse: { name: 'read_file', response: { content: '# My Mod' } } }] },
+    ],
+    tools: [
+      { functionDeclarations: [{ name: 'read_file', description: 'Read file', parameters: {} }] },
+    ],
+  },
+};
+const generatedPrompt = extractPromptFromAnyPayload(mockPayload);
+assert(generatedPrompt.includes('User (Tool Result):'), 'Tool response must be labeled User (Tool Result)');
+assert(!generatedPrompt.includes('Assistant:\n[Tool Result: read_file]'), 'Tool response must NOT be labeled Assistant');
+assert(generatedPrompt.trim().endsWith('Assistant:'), 'Prompt must end with Assistant: cue for the model to take action');
+console.log('  -> PASS: Tool responses correctly labeled as User (Tool Result) and prompt ends with Assistant: cue.');
+
+console.log('\n>>> ALL 4 EXTENDED TOOL CALLING TESTS PASSED SUCCESSFULLY! <<<');

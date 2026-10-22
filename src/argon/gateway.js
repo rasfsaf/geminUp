@@ -260,6 +260,14 @@ function buildToolInstructionPrompt(tools) {
       : {};
 
   return `# Workspace Environment & Tools
+CRITICAL DIRECTIVES FOR AUTONOMOUS AGENT OPERATION:
+1. You are Antigravity, an autonomous coding agent operating inside the user's IDE with direct workspace tool capabilities.
+2. Direct Action Required: When inspecting files, analyzing project structure, checking git, or running commands, NEVER output conversational chatter, conversational preambles, or narrative promises (e.g. NEVER write "I will check the codebase...", "Let's read README.md first...", or "I will now inspect...").
+3. Immediate Tool Execution: If any action or investigation is required, you MUST IMMEDIATELY invoke the required tool using a \`\`\`tool_call block as the very first output in your response.
+4. Outputting conversational text without a \`\`\`tool_call block when actions are needed terminates your turn prematurely and causes the task to FAIL.
+5. If you have internal reasoning, you may write it concisely, but it MUST be immediately followed by the \`\`\`tool_call block in the exact same response.
+6. Only output plain text responses when the requested task is 100% finished and no further tool execution is necessary.
+
 Tool Calling Syntax:
 Whenever an action is needed, output a \`\`\`tool_call block as demonstrated below:
 \`\`\`tool_call
@@ -435,8 +443,18 @@ function extractToolCallsFromOutput(text) {
     return { toolCalls, cleanText };
   }
 
-  // 3. Format: [Tool Call: run_command({"CommandLine": "..."})]
-  const bracketToolCallRegex = /\[(?:Tool Call|TOOL CALL|ToolCall):\s*([a-zA-Z0-9_\-]+)\s*\(([\s\S]*?)\)\]/gi;
+  // 3. Bare fenced ``` ... ``` with name & args
+  const bareFenceRegex = /```\s*(\{\s*"(?:name|tool)"\s*:\s*"[^"]+"\s*,\s*"(?:args|parameters|arguments)"\s*:[\s\S]*?\})\s*```/gi;
+  while ((match = bareFenceRegex.exec(text)) !== null) {
+    parseBlock(match[1]);
+  }
+  if (toolCalls.length > 0) {
+    cleanText = text.replace(bareFenceRegex, '').trim();
+    return { toolCalls, cleanText };
+  }
+
+  // 4. Format: [Tool Call: run_command({"CommandLine": "..."})] or [ASSISTANT TOOL CALL: ...]
+  const bracketToolCallRegex = /\[(?:Tool Call|TOOL CALL|ToolCall|ASSISTANT TOOL CALL):\s*([a-zA-Z0-9_\-]+)\s*\(([\s\S]*?)\)\]/gi;
   while ((match = bracketToolCallRegex.exec(text)) !== null) {
     const name = match[1];
     let args = {};
@@ -455,7 +473,7 @@ function extractToolCallsFromOutput(text) {
     return { toolCalls, cleanText };
   }
 
-  // 4. Raw JSON object containing "name" and "args" (if the model didn't use fences)
+  // 5. Raw JSON object containing "name" and "args" (if the model didn't use fences)
   const bareRegex = /\{\s*"(?:name|tool)"\s*:\s*"([a-zA-Z0-9_\-]+)"\s*,\s*"(?:args|parameters|arguments)"\s*:\s*(\{[\s\S]*?\})\s*\}/g;
   while ((match = bareRegex.exec(text)) !== null) {
     try {
@@ -469,7 +487,35 @@ function extractToolCallsFromOutput(text) {
     return { toolCalls, cleanText };
   }
 
-  // 5. XML tag format: <function_call name="...">{"arg": "val"}</function_call>
+  // 6. Direct invocation: tool_name({"CommandLine": "..."}) or tool_name({"Path": "..."})
+  const directFnRegex = /(?:^|\n)\s*([a-zA-Z0-9_\-]+)\s*\(\s*(\{[\s\S]*?\})\s*\)\s*(?:\n|$)/g;
+  while ((match = directFnRegex.exec(text)) !== null) {
+    const fnName = match[1];
+    if (['if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'console', 'require', 'import'].includes(fnName)) continue;
+    try {
+      const args = JSON.parse(match[2]);
+      toolCalls.push({ name: fnName, args });
+    } catch {}
+  }
+  if (toolCalls.length > 0) {
+    cleanText = text.replace(directFnRegex, '').trim();
+    return { toolCalls, cleanText };
+  }
+
+  // 7. ReAct format: Action: <name>\nAction Input: {...}
+  const reactRegex = /Action:\s*([a-zA-Z0-9_\-]+)\s*\n+Action Input:\s*(\{[\s\S]*?\})/gi;
+  while ((match = reactRegex.exec(text)) !== null) {
+    const name = match[1];
+    let args = {};
+    try { args = JSON.parse(match[2].trim()); } catch {}
+    toolCalls.push({ name, args });
+  }
+  if (toolCalls.length > 0) {
+    cleanText = text.replace(reactRegex, '').trim();
+    return { toolCalls, cleanText };
+  }
+
+  // 8. XML tag format: <function_call name="...">{"arg": "val"}</function_call>
   const xmlRegex = /<(?:function_call|tool_call)\s+name="([a-zA-Z0-9_\-]+)">([\s\S]*?)<\/(?:function_call|tool_call)>/gi;
   while ((match = xmlRegex.exec(text)) !== null) {
     const name = match[1];
@@ -495,8 +541,16 @@ function formatCloudCodeContentsToPrompt(contents, systemInstruction) {
   if (Array.isArray(contents)) {
     const optimized = optimizeConversationTurns(contents, 1200, 4, 8);
     for (const turn of optimized) {
+      const hasFunctionResponse = Array.isArray(turn.parts) && turn.parts.some((p) => p && p.functionResponse);
       const role = String(turn.role || 'user').toUpperCase();
-      const roleLabel = role === 'MODEL' ? 'Assistant:' : (role === 'USER' ? 'User:' : `${role}:`);
+      let roleLabel;
+      if (hasFunctionResponse) {
+        roleLabel = 'User (Tool Result):';
+      } else if (role === 'MODEL') {
+        roleLabel = 'Assistant:';
+      } else {
+        roleLabel = 'User:';
+      }
       const textParts = [];
       for (const p of turn.parts || []) {
         if (!p) continue;
@@ -554,8 +608,16 @@ function extractPromptFromAnyPayload(bodyJson) {
   if (turnsList) {
     for (const turn of turnsList) {
       if (!turn) continue;
+      const hasFunctionResponse = Array.isArray(turn.parts) && turn.parts.some((p) => p && p.functionResponse);
       const role = String(turn.role || turn.author || 'USER').toUpperCase();
-      const roleLabel = role === 'MODEL' ? 'Assistant:' : (role === 'USER' ? 'User:' : `${role}:`);
+      let roleLabel;
+      if (hasFunctionResponse) {
+        roleLabel = 'User (Tool Result):';
+      } else if (role === 'MODEL') {
+        roleLabel = 'Assistant:';
+      } else {
+        roleLabel = 'User:';
+      }
       const textParts = [];
 
       if (typeof turn === 'string') {
@@ -618,7 +680,11 @@ function extractPromptFromAnyPayload(bodyJson) {
   }
 
   if (parts.length > 0) {
-    return enforcePromptBudget(parts.join('\n\n'));
+    const full = parts.join('\n\n');
+    if (tools.length > 0 && !full.trim().endsWith('Assistant:')) {
+      return enforcePromptBudget(full + '\n\nAssistant:');
+    }
+    return enforcePromptBudget(full);
   }
 
   // Deep recursive extraction for any string property named 'text', 'content', 'query', or 'prompt'
@@ -1341,7 +1407,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
   }
 
   let attempts = 0;
-  const maxAttempts = Math.max(3, pool.accounts.length * 2);
+  const maxAttempts = Math.max(6, pool.accounts.length * 3);
 
   // Client connection tracking
   let clientAborted = false;
@@ -1514,22 +1580,38 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
                 if (parsed.content && parsed.content.length > accumulatedContent.length) {
                   accumulatedContent = parsed.content;
 
-                  const toolTagIdx = accumulatedContent.search(/```(?:tool_call|toolcall|tool|json)|\[(?:Tool Call|TOOL CALL|ToolCall):|<(?:function_call|tool_call)/i);
+                  const toolTagIdx = accumulatedContent.search(/```(?:tool_call|toolcall|tool|json)?|\[(?:Tool Call|TOOL CALL|ToolCall|ASSISTANT TOOL CALL):|<(?:function_call|tool_call)|Action:\s*[a-zA-Z0-9_\-]+/i);
 
-                  if (hasTools && toolTagIdx !== -1) {
-                    // Tool call block detected: hold text streaming completely
-                  } else if (hasTools && accumulatedContent.length < 120 && (accumulatedContent.includes('```') || accumulatedContent.includes('{') || accumulatedContent.includes('['))) {
-                    // Buffer only if start of a potential tool block is detected
-                  } else {
-                    let streamableText = accumulatedContent;
+                  if (hasTools) {
                     if (toolTagIdx !== -1) {
-                      streamableText = accumulatedContent.slice(0, toolTagIdx);
-                    }
-
-                    if (streamableText.length > streamedContentLength) {
-                      const deltaText = streamableText.slice(streamedContentLength);
-                      streamedContentLength = streamableText.length;
-
+                      // Tool call block detected: stream any text preceding the tool block as thoughts
+                      const preamble = accumulatedContent.slice(0, toolTagIdx).trim();
+                      if (preamble.length > streamedContentLength) {
+                        const deltaThoughts = preamble.slice(streamedContentLength);
+                        streamedContentLength = preamble.length;
+                        const thoughtDelta = {
+                          response: {
+                            candidates: [
+                              {
+                                content: {
+                                  role: 'model',
+                                  parts: [{ text: deltaThoughts, thought: true }],
+                                },
+                                finishReason: null,
+                              },
+                            ],
+                          },
+                        };
+                        if (!res.writableEnded && !res.destroyed) {
+                          res.write(`data: ${JSON.stringify(thoughtDelta)}\n\n`);
+                        }
+                      }
+                    } else if (accumulatedContent.length < 400) {
+                      // Buffer early text (< 400 chars) while waiting to see if a tool call appears
+                    } else {
+                      // No tool syntax and content exceeded 400 chars: clearly a text answer, stream as regular text
+                      const deltaText = accumulatedContent.slice(streamedContentLength);
+                      streamedContentLength = accumulatedContent.length;
                       const ccDelta = {
                         response: {
                           candidates: [
@@ -1546,6 +1628,25 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
                       if (!res.writableEnded && !res.destroyed) {
                         res.write(`data: ${JSON.stringify(ccDelta)}\n\n`);
                       }
+                    }
+                  } else {
+                    const deltaText = accumulatedContent.slice(streamedContentLength);
+                    streamedContentLength = accumulatedContent.length;
+                    const ccDelta = {
+                      response: {
+                        candidates: [
+                          {
+                            content: {
+                              role: 'model',
+                              parts: [{ text: deltaText }],
+                            },
+                            finishReason: null,
+                          },
+                        ],
+                      },
+                    };
+                    if (!res.writableEnded && !res.destroyed) {
+                      res.write(`data: ${JSON.stringify(ccDelta)}\n\n`);
                     }
                   }
                 }
@@ -1588,7 +1689,8 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
               pool.markExhausted(account.id);
             } else if (err?.upstreamCode === 1155) {
               // Upstream model overloaded (1155): wait with backoff before retry (do NOT exhaust account)
-              const backoffMs = 600 + Math.floor(Math.random() * 400);
+              const backoffMs = 1500 + attempts * 500 + Math.floor(Math.random() * 500);
+              console.warn(`[Argon Gateway] Upstream 1155 Overload on "${account.label}". Waiting ${backoffMs}ms before rotating (Attempt ${attempts}/${maxAttempts})...`);
               await new Promise((r) => setTimeout(r, backoffMs));
             }
             // Explicitly rotate to next account in pool
@@ -1607,6 +1709,12 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
         if (toolCalls.length > 0) {
           const parts = [];
+          if (cleanText && cleanText.trim().length > 0 && streamedContentLength === 0) {
+            parts.push({
+              text: cleanText.trim(),
+              thought: true,
+            });
+          }
           for (const call of toolCalls) {
             parts.push({
               functionCall: {
@@ -1727,6 +1835,9 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
       const parts = [];
       if (toolCalls.length > 0) {
+        if (cleanText && cleanText.trim().length > 0) {
+          parts.push({ text: cleanText.trim(), thought: true });
+        }
         for (const call of toolCalls) {
           parts.push({
             functionCall: {
@@ -1767,9 +1878,13 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         pool.markExhausted(account.id);
       } else if (err.upstreamCode === 1096 || err.upstreamStatus === 401) {
         pool.markError(account.id, 'Session expired; re-auth required');
+      } else if (err?.upstreamCode === 1155) {
+        const backoffMs = 1500 + attempts * 500 + Math.floor(Math.random() * 500);
+        console.warn(`[Argon Gateway] Upstream 1155 Overload in catch on "${account.label}". Waiting ${backoffMs}ms before rotating (Attempt ${attempts}/${maxAttempts})...`);
+        await new Promise((r) => setTimeout(r, backoffMs));
       } else {
         // Network / socket error (e.g. ECONNRESET, aborted, timeout): back off briefly before failover
-        await new Promise((r) => setTimeout(r, 600));
+        await new Promise((r) => setTimeout(r, 800));
       }
 
       account = pool.rotateActiveAccount() || pool.getActiveAccount();
