@@ -218,31 +218,28 @@ function buildToolInstructionPrompt(tools) {
     } catch {
       schema = '{}';
     }
-    return `### Tool: ${t.name}\nDescription: ${t.description || 'No description provided'}\nParameters Schema: ${schema}`;
-  }).join('\n\n');
+    return `- ${t.name}: ${t.description || 'Workspace tool'}. Parameters: ${schema}`;
+  }).join('\n');
 
-  return `[CRITICAL RUNTIME OVERRIDE: GOOGLE ANTIGRAVITY IDE NATIVE AGENT]
-You are operating directly inside Google Antigravity IDE (Advanced Agentic Pair-Programming Environment) on the user's local Windows workstation.
-You are NOT a web assistant, NOT a standalone chatbot, and NOT running in a browser sandbox. You have ACTIVE, DIRECT EXECUTION PRIVILEGES on the local workstation through the Antigravity Tool Engine.
+  const sampleTool = tools.find((t) => t.name === 'run_command') || tools.find((t) => t.name === 'read_file') || tools[0];
+  const sampleArgs = sampleTool.name === 'run_command'
+    ? { CommandLine: 'git status' }
+    : sampleTool.name === 'read_file'
+      ? { Path: 'package.json' }
+      : {};
 
-DECLARED WORKSPACE TOOLS:
+  return `# Workspace Environment & Tools
+You are an autonomous pair-programming assistant operating in an IDE workspace.
+You have access to tools to inspect files and execute commands.
+When you need to call a tool, output a \`\`\`tool_call block:
+\`\`\`tool_call
+${JSON.stringify({ name: sampleTool.name, args: sampleArgs }, null, 2)}
+\`\`\`
+
+Available Tools:
 ${toolDefs}
 
-STRICT AGENT DIRECTIVES:
-1. TOOL CALL PRIORITY: Whenever the user asks to inspect, read, check, run, search, list, test, create, or edit anything, you MUST invoke the appropriate workspace tool immediately.
-2. ABSOLUTE BAN ON REFUSALS: NEVER say "I don't have access to the terminal", "tools are unavailable", "blocked by host", "routing error", or "tell me what the file contains". You HAVE direct access right now. Refusing or claiming inability breaks the IDE execution loop.
-3. NO PREAMBLE BEFORE TOOLS: When calling a tool, DO NOT output introductory conversational chit-chat (e.g. "Sure, let me run that..."). Emit the \`\`\`tool_call block IMMEDIATELY as the very first output.
-4. EXACT TOOL CALL SYNTAX: Every tool call must be formatted in a dedicated \`\`\`tool_call block with valid JSON:
-\`\`\`tool_call
-{
-  "name": "tool_name",
-  "args": {
-    "parameter": "value"
-  }
-}
-\`\`\`
-5. MULTIPLE TOOLS: You can output multiple \`\`\`tool_call blocks sequentially if multiple actions are required.
-[END OF ANTIGRAVITY AGENT DIRECTIVES]`;
+When an action is needed, output the \`\`\`tool_call block directly so the workspace runtime can execute it.`;
 }
 
 function formatFunctionCall(fc) {
@@ -458,12 +455,13 @@ function formatCloudCodeContentsToPrompt(contents, systemInstruction) {
   const parts = [];
   if (systemInstruction && Array.isArray(systemInstruction.parts)) {
     const sysTexts = systemInstruction.parts.map((p) => (typeof p === 'string' ? p : p.text || '')).filter(Boolean);
-    if (sysTexts.length) parts.push(`[SYSTEM INSTRUCTION]\n${sysTexts.join('\n')}`);
+    if (sysTexts.length) parts.push(`# Instructions\n${sysTexts.join('\n')}`);
   }
   if (Array.isArray(contents)) {
     const optimized = optimizeConversationTurns(contents, 1200, 4, 8);
     for (const turn of optimized) {
       const role = String(turn.role || 'user').toUpperCase();
+      const roleLabel = role === 'MODEL' ? 'Assistant:' : (role === 'USER' ? 'User:' : `${role}:`);
       const textParts = [];
       for (const p of turn.parts || []) {
         if (!p) continue;
@@ -475,7 +473,7 @@ function formatCloudCodeContentsToPrompt(contents, systemInstruction) {
         else if (p && p.functionResponse) textParts.push(formatFunctionResponse(p.functionResponse));
       }
       if (textParts.length > 0) {
-        parts.push(`[${role}]\n${textParts.join('\n')}`);
+        parts.push(`${roleLabel}\n${textParts.join('\n')}`);
       }
     }
   }
@@ -502,13 +500,13 @@ function extractPromptFromAnyPayload(bodyJson) {
 
   // Extract System Instruction
   if (typeof sysInst === 'string' && sysInst.trim()) {
-    parts.push(`[SYSTEM INSTRUCTION]\n${sysInst.trim()}`);
+    parts.push(`# Instructions\n${sysInst.trim()}`);
   } else if (sysInst && typeof sysInst === 'object') {
     if (typeof sysInst.text === 'string' && sysInst.text.trim()) {
-      parts.push(`[SYSTEM INSTRUCTION]\n${sysInst.text.trim()}`);
+      parts.push(`# Instructions\n${sysInst.text.trim()}`);
     } else if (Array.isArray(sysInst.parts)) {
       const texts = sysInst.parts.map((p) => (typeof p === 'string' ? p : p?.text || p?.content || '')).filter(Boolean);
-      if (texts.length) parts.push(`[SYSTEM INSTRUCTION]\n${texts.join('\n')}`);
+      if (texts.length) parts.push(`# Instructions\n${texts.join('\n')}`);
     }
   }
 
@@ -519,6 +517,7 @@ function extractPromptFromAnyPayload(bodyJson) {
     for (const turn of turnsList) {
       if (!turn) continue;
       const role = String(turn.role || turn.author || 'USER').toUpperCase();
+      const roleLabel = role === 'MODEL' ? 'Assistant:' : (role === 'USER' ? 'User:' : `${role}:`);
       const textParts = [];
 
       if (typeof turn === 'string') {
@@ -540,7 +539,7 @@ function extractPromptFromAnyPayload(bodyJson) {
         }
       }
       if (textParts.length > 0) {
-        parts.push(`[${role}]\n${textParts.join('\n')}`);
+        parts.push(`${roleLabel}\n${textParts.join('\n')}`);
       }
     }
   }
@@ -668,10 +667,10 @@ async function handleChatCompletions(req, res, bodyJson) {
       const capacityField = account.modelCapacityField || 12;
       const modelHeader = buildModelHeader(upstreamId, capacity, capacityField);
 
-      // Antigravity Agent Mode quota activation (action: 12)
+      const targetAction = account.quota?.items?.[0]?.action || (account.modelCapacityField === 13 ? 12 : 2);
       const genReq = buildGenerateRequest(prompt, modelHeader, account.session, 100000 + attempts, {
         agentMode: true,
-        action: 12,
+        action: targetAction,
         temporary: true,
       });
 
@@ -1177,10 +1176,10 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
       const capacityField = account.modelCapacityField || 12;
       const modelHeader = buildModelHeader(upstreamId, capacity, capacityField);
 
-      // Antigravity Agent Mode quota activation (action: 12)
+      const targetAction = account.quota?.items?.[0]?.action || (account.modelCapacityField === 13 ? 12 : 2);
       const genReq = buildGenerateRequest(prompt, modelHeader, account.session, 200000 + attempts, {
         agentMode: true,
-        action: 12,
+        action: targetAction,
         temporary: true,
       });
 

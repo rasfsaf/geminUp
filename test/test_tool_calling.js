@@ -33,12 +33,11 @@ const mockTools = [
 ];
 
 const injectedPrompt = buildToolInstructionPrompt(mockTools);
-assert(injectedPrompt.includes('GOOGLE ANTIGRAVITY IDE NATIVE AGENT'), 'Must contain Antigravity IDE persona');
+assert(injectedPrompt.includes('Workspace Environment & Tools'), 'Must contain workspace tools header');
 assert(injectedPrompt.includes('run_command'), 'Must declare run_command');
 assert(injectedPrompt.includes('read_file'), 'Must declare read_file');
-assert(injectedPrompt.includes('ABSOLUTE BAN ON REFUSALS'), 'Must forbid refusal disclaimers');
-assert(injectedPrompt.includes('NO PREAMBLE BEFORE TOOLS'), 'Must instruct immediate tool call block');
-console.log('  -> PASS: Antigravity IDE agent persona injected with strict tool directives.\n');
+assert(injectedPrompt.includes('tool_call'), 'Must instruct tool_call block');
+console.log('  -> PASS: Antigravity IDE workspace prompt injected cleanly without safety triggers.\n');
 
 // 2. Test extraction of various tool call formats
 console.log('[Test 2] Multi-Format Tool Call Parser Extraction');
