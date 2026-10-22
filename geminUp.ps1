@@ -2859,15 +2859,14 @@ function Show-ArgonMenu {
         Write-Host '  4. Remove Account from Pool'
         Write-Host '  5. Force Session Keep-Alive & Quota Refresh'
         Write-Host '  6. Test Argon Model Status & Latency'
-        Write-Host '  7. Toggle Claude Sonnet 4.6 -> Gemini 4 Argon Redirection'
-        Write-Host '  8. Stop Argon Gateway'
-        Write-Host '  9. Connection Instructions for IDE'
-        Write-Host '  10. Toggle Global Flash -> Ultra-Quota Pool'
-        Write-Host '  11. Toggle Vision Media Mode (Local Disk Bridge vs Direct Cloud Code)'
+        Write-Host '  7. Stop Argon Gateway'
+        Write-Host '  8. Connection Instructions for IDE'
+        Write-Host '  9. Toggle Global Flash -> Ultra-Quota Pool'
+        Write-Host '  10. Toggle Vision Media Mode (Local Disk Bridge vs Direct Cloud Code)'
         Write-Host '  0. Return to main menu'
         Write-Host ''
 
-        $sub = Read-Host 'Select 0-11'
+        $sub = Read-Host 'Select 0-10'
         try {
             switch ($sub) {
                 '1' { Start-ArgonBridge; Start-Sleep -Seconds 2; break }
@@ -2876,13 +2875,12 @@ function Show-ArgonMenu {
                 '4' { Remove-ArgonAccount; Start-Sleep -Seconds 2; break }
                 '5' { Invoke-ArgonKeepAlive; Read-Host 'Press Enter to continue'; break }
                 '6' { Test-ArgonPipeline; Read-Host 'Press Enter to continue'; break }
-                '7' { Switch-AntigravityArgonRouting; Start-Sleep -Seconds 2; break }
-                '8' { Stop-ArgonBridge; Start-Sleep -Seconds 1; break }
-                '9' { Show-ArgonConnectionInfo; Read-Host 'Press Enter to continue'; break }
-                '10' { Switch-AntigravityFlashRouting; Start-Sleep -Seconds 2; break }
-                '11' { Switch-AntigravityVisionRouting; Start-Sleep -Seconds 2; break }
+                '7' { Stop-ArgonBridge; Start-Sleep -Seconds 1; break }
+                '8' { Show-ArgonConnectionInfo; Read-Host 'Press Enter to continue'; break }
+                '9' { Switch-AntigravityFlashRouting; Start-Sleep -Seconds 2; break }
+                '10' { Switch-AntigravityVisionRouting; Start-Sleep -Seconds 2; break }
                 '0' { return }
-                default { Write-TransportLog WARN 'Enter 0 through 11.'; Start-Sleep -Seconds 2; continue }
+                default { Write-TransportLog WARN 'Enter 0 through 10.'; Start-Sleep -Seconds 2; continue }
             }
         }
         catch {

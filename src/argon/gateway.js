@@ -970,7 +970,7 @@ async function forwardToGoogleCloudCode(req, res, reqBuffer) {
       path: upstreamUrl.pathname + upstreamUrl.search,
       method: req.method,
       headers,
-      agent: directHttpsAgent,
+      agent: httpAgent || directHttpsAgent,
       timeout: 15000,
     };
 
@@ -1023,7 +1023,7 @@ async function forwardUserQuota(req, res, reqBuffer) {
       path: upstreamUrl.pathname + upstreamUrl.search,
       method: req.method,
       headers,
-      agent: directHttpsAgent,
+      agent: httpAgent || directHttpsAgent,
       timeout: 15000,
     };
 
@@ -1109,7 +1109,7 @@ async function forwardAvailableModels(req, res, reqBuffer) {
       path: upstreamUrl.pathname + upstreamUrl.search,
       method: req.method,
       headers,
-      agent: directHttpsAgent,
+      agent: httpAgent || directHttpsAgent,
       timeout: 15000,
     };
 
@@ -1249,15 +1249,13 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
   const isArgon = rawModel.includes('argon') || deepJsonStr.includes('gemini-4-argon');
   const isSonnet = rawModel.includes('sonnet') || rawModel.includes('claude') || rawModel.includes('opus') || deepJsonStr.includes('claude-sonnet') || deepJsonStr.includes('sonnet');
-  const isDedicatedFlash = rawModel.includes('gemini-3.8-flash') || rawModel.includes('ultra-quota') || deepJsonStr.includes('gemini-3.8-flash');
-  const isGlobalFlashRedirect = redirectConfig.redirectFlashToPool && (rawModel.includes('flash') || deepJsonStr.includes('flash'));
-  const isFlash = isDedicatedFlash || isGlobalFlashRedirect;
+  const isFlashRedirect = redirectConfig.redirectFlashToPool && (rawModel.includes('flash') || deepJsonStr.includes('flash'));
 
-  // STRICT DEFAULT: When redirectSonnetToArgon or Argon is active, Claude Sonnet is ALWAYS intercepted.
-  // If redirectSonnetToArgon is enabled, treat any non-explicit-flash model as Sonnet/Argon to prevent Google baseline quota leaks.
-  const isTargeted = isArgon || isSonnet || isFlash || (redirectConfig.redirectSonnetToArgon && !rawModel.includes('gemini-2') && !rawModel.includes('gemini-1'));
+  // Mandatory policy: Claude Sonnet is ALWAYS mapped to Gemini 4 Argon whenever Argon Gateway is running.
+  // It cannot be toggled off independently; it lives strictly with the gateway lifecycle.
+  const isTargeted = isArgon || isSonnet || isFlashRedirect;
 
-  // If this model is not targeted for pool routing, pass through to Google Cloud Code
+  // If this model is not targeted for pool routing, pass through to Google Cloud Code (routed via SOCKS5 tunnel)
   if (!isTargeted) {
     return await forwardToGoogleCloudCode(req, res, rawBuf);
   }
