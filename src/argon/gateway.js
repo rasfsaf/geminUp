@@ -1555,16 +1555,20 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
           return;
         }
 
-        // If upstream errored, overloaded or disconnected before data was emitted, failover to next account & reconnect
-        if (!streamResult.ok || streamError) {
+        // Failover condition:
+        // 1. streamResult.ok === false or streamError is set
+        // 2. OR streamedContentLength === 0 and accumulatedContent is completely empty (Google finished stream with 0 text/tool calls)
+        const streamProducedNoContent = streamedContentLength === 0 && (!accumulatedContent || accumulatedContent.trim().length === 0);
+        if (!streamResult.ok || streamError || streamProducedNoContent) {
           const err = streamResult.error || streamError;
-          const errMsg = err?.message || 'Upstream stream error';
+          const errMsg = err?.message || (streamProducedNoContent ? 'Upstream returned empty body' : 'Upstream stream error');
           if (streamedContentLength === 0 && attempts < maxAttempts) {
-            console.warn(`[Argon Gateway] Upstream error on "${account.label}" (${errMsg}). Failing over & reconnecting (Attempt ${attempts}/${maxAttempts})...`);
-            if (err?.upstreamStatus === 429) {
+            console.warn(`[Argon Gateway] Upstream error/empty on "${account.label}" (${errMsg}). Failing over & reconnecting (Attempt ${attempts}/${maxAttempts})...`);
+            if (err?.upstreamStatus === 429 || err?.upstreamCode === 1037) {
               pool.markExhausted(account.id);
             }
-            account = pool.getActiveAccount() || account;
+            // Explicitly rotate to next account in pool
+            account = pool.rotateActiveAccount() || account;
             continue;
           }
         }

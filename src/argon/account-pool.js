@@ -473,14 +473,30 @@ class AccountPool {
     console.warn(`[Argon Pool] Account "${acc.label}" (${acc.id}) marked error: ${reason}`);
 
     if (this.activeAccountId === accountId) {
-      const next = this.accounts.find((a) => a.id !== accountId && a.status === 'standby');
+      const next = this.accounts.find((a) => a.id !== accountId && (a.status === 'standby' || a.status === 'active'));
       if (next) {
         this.activeAccountId = next.id;
         next.status = 'active';
-        console.info(`[Argon Pool] Errored active account rotated to standby "${next.label}" (${next.id})`);
+        console.info(`[Argon Pool] Errored active account rotated to "${next.label}" (${next.id})`);
       }
     }
     this.save();
+  }
+
+  rotateActiveAccount() {
+    const available = this.accounts.filter((a) => a.status === 'active' || a.status === 'standby');
+    if (available.length <= 1) return this.getActiveAccount();
+    const currentIdx = available.findIndex((a) => a.id === this.activeAccountId);
+    const nextIdx = (currentIdx + 1) % available.length;
+    const next = available[nextIdx];
+    this.activeAccountId = next.id;
+    next.status = 'active';
+    for (const a of available) {
+      if (a.id !== next.id) a.status = 'standby';
+    }
+    this.save();
+    console.info(`[Argon Pool] Explicitly rotated active account to "${next.label}" (${next.id})`);
+    return next;
   }
 
   startKeepAliveLoop() {
