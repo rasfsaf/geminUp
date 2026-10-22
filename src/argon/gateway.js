@@ -897,7 +897,7 @@ function getRedirectConfig() {
       };
     }
   } catch { }
-  return { enabled: true, redirectFlashToPool: false, passVisionToCloudCode: false, failClosed: true };
+  return { enabled: true, redirectFlashToPool: false, passVisionToCloudCode: true, failClosed: false };
 }
 
 // Transparent upstream proxy to real Google Cloud Code endpoint for metadata & handshake
