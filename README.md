@@ -4,7 +4,7 @@
 
 [![Telegram Channel](https://img.shields.io/badge/Telegram-Канал%20Разработчика-blue?logo=telegram)](https://t.me/iqsklad20)
 
-`geminUp` — открытый проект для доступа к Google Gemini через пользовательский SOCKS5-прокси и автономный шлюз Gemini 4 Argon.
+`geminUp` — открытый проект для доступа к Google Gemini через пользовательский SOCKS5-прокси и локальный компрессор контекста Jewish Tokenizer.
 
 В проект входят два разных компонента:
 
@@ -49,6 +49,17 @@ Android-приложение не является VPN и не перехват�
 4. Запусти `geminUp.bat` и подтверди UAC.
 5. Выбери пункт `1` и введи SOCKS5.
 
+Поддерживаются форматы:
+
+```text
+host:port:username:password
+socks5://username:password@host:port
+```
+
+Если логин или пароль содержит двоеточие либо специальные символы, используй URL-форму с percent-encoding.
+
+После зелёного `SUCCESSFUL` полностью перезапусти открытые браузеры и Antigravity, чтобы оборвать старые прямые соединения.
+
 Не скачивай один `geminUp.bat` из исходников: рядом с ним нужны PowerShell-контроллер, C#-ядро и список доменов.
 
 ### Один bootstrap-файл
@@ -71,60 +82,34 @@ Android-приложение не является VPN и не перехват�
 5. Enable YouTube routing
 6. Patch Antigravity binaries
 7. Roll back Antigravity binary patch
-8. Gemini 4 Argon pipeline (Native Gateway Engine)
+8. Jewish Tokenizer: Context Compression Proxy
 ```
 
 Пункт 5 переключается между `Enable YouTube routing` и `Disable YouTube routing`. Настройка по умолчанию выключена, сохраняется между обновлениями и применяется без повторного ввода SOCKS5. После переключения полностью перезапусти открытые браузеры, чтобы они закрыли старые соединения.
 
 Пункты 6 и 7 правят `language_server*.exe` и `agy.exe`: поле protobuf `ineligible` заменяется на `inexigible`. Длина строки та же, размер и структура файла не меняются. Enable и Refresh применяют патч сами; пункт 6 запускает его отдельно, пункт 7 возвращает `ineligible`. Та же замена снимает другие клиентские ошибки Antigravity, завязанные на это поле, включая состояние ineligible account (`SET_INELIGIBLE` / `ineligibleTiers`). Если установка не найдена, меню просит путь к exe или к папке. Полный обход папки начинается с `scan `, если обычных мест недостаточно.
 
-Пункт 8 открывает меню автономного локального шлюза Gemini 4 Argon (100% локальный, конфиденциальный, без внешних зависимостей). Сервис запускается на `127.0.0.1:8083` и реализует уникальную архитектуру:
-- **Разблокировка Gemini 4 Argon в интерфейсе Antigravity:** при включении маршрутизации шлюз транслирует статус модели `gemini-4-argon` без флага `"tagTitle": "Unavailable"` и `"disabled": false`, делая модель нативно доступной для выбора прямо в выпадающем списке моделей Antigravity.
-- **Расширенные квоты Antigravity Agent Mode (`action: 12`):** Protobuf-запросы принудительно задействуют серверный режим агента, обходя жесткие 5-часовые лимиты обычного веб-чата (`action: 2`).
-- **Сквозная маршрутизация Claude и Gemini:** запросы моделей Claude (Sonnet 3.7 / Opus) или Gemini прозрачно перенаправляются в локальный пайплайн Argon с сохранением максимальной производительности.
-- **Изоляция параллельных чатов и субагентов:** каждый запрос выполняется полностью stateless со стороны Google Web RPC (`temporary: true`, уникальный request UUID). Контекст диалога хранится исключительно на стороне клиента (IDE), поэтому множество открытых вкладок и параллельно запущенных субагентов работают абсолютно изолированно и никогда не смешивают контексты.
-- **Sticky-пул аккаунтов и мгновенный failover:** шлюз удерживает один рабочий аккаунт (время первого токена 1–2 сек) и автоматически переключается на резервные аккаунты из пула `%ProgramData%\geminUp\argon\accounts.json` при получении HTTP 429 или исчерпании лимита.
-- **Непрерывный Keep-Alive сессий:** периодический фоновый опрос квот (`qpEbW`) автоматически подхватывает ротируемые токены `__Secure-1PSIDTS` из заголовков ответа Google, предотвращая устаревание сессий.
-- **Наглядный мониторинг квот в CLI:** в консоли отображаются живые индикаторы остатка квот Antigravity Agent Mode (`action: 12`) и Web Chat (`action: 2`) для всех аккаунтов в ротации.
-- **Двойной API-интерфейс:** шлюз поддерживает как нативный протокол Antigravity Cloud Code (`/v1internal:*`), так и стандартный OpenAI-совместимый API (`http://127.0.0.1:8083/v1`) для сторонних расширений (Roo Code, Cline, Cursor, Continue и др.).
-- **Канал разработчика в Telegram:** новости, обновления и инсайты проекта публикуются в канале [https://t.me/iqsklad20](https://t.me/iqsklad20).
+### 8. Jewish Tokenizer: Context Compression Proxy (Еврейский Токенизатор)
 
-### Добавление аккаунтов Google в пул Argon (пошагово)
+Автономный локальный прокси-компрессор контекста для Google Antigravity IDE, сохраняющий до 90% токенов в диалоговых сессиях.
 
-1. Открой обычное окно браузера и авторизуйся на [gemini.google.com](https://gemini.google.com) под своим Google-аккаунтом.
-2. **Экспорт через расширение cookies.txt (Рекомендуется):**
-   - Установи расширение [cookies.txt](https://github.com/hrdl-github/cookies-txt) (экспортирует чистый Netscape HTTP Cookie File);
-   - Открой вкладку `gemini.google.com`, кликни по иконке расширения и скачай файл `cookies.txt` (или скопируй его содержимое);
-   - В меню `geminUp.bat` -> пункт `8` -> `2` выбери `1` (Read from Clipboard) или `2` (Read from file) и укажи путь к файлу.
-3. **Альтернативный способ (через DevTools без расширений):**
-   - Нажми `F12` (DevTools) -> перейди на вкладку `Network` (Сеть) -> нажми `F5` (обновить) -> выбери любой запрос к `gemini.google.com`;
-   - В блоке `Request Headers` найди заголовок `Cookie`, кликни правой кнопкой мыши и нажми **Copy Value**;
-   - Вставь куку в меню geminUp через буфер обмена.
-4. Шлюз автоматически распознает токены (`__Secure-1PSID`, `SAPISID`, `SID` и др.), подтвердит сессию на серверах Google, запросит квоты и сохранит аккаунт в зашифрованный пул `%ProgramData%\geminUp\argon\accounts.json`.
-5. Чтобы создать отказоустойчивый пул — повтори операцию для второго/третьего аккаунта. При исчерпании лимитов шлюз переключится на резервные аккаунты автоматически.
+- **Экономия до 90% токенов:** автоматически предотвращает взрывное раздувание контекста при длительных итерациях диалога, оптимизируя объём передаваемых данных без потери сути.
+- **Полная прозрачность для аккаунта:** авторизация, проверка квот и операции с аккаунтом в Antigravity выполняются напрямую и не затрагиваются компрессором.
+- **Интеграция с MCP-памятью:** индексирует историю диалогов и обеспечивает доступ к детальным данным через встроенный MCP-сервер `jigit-memory`.
+- **100% локально и конфиденциально:** работает на `127.0.0.1:8083` без внешних сервисов, cookies и сторонних аккаунтов.
+- **Двойной API-интерфейс:** поддерживает нативный протокол Antigravity Cloud Code и OpenAI-совместимый API (`http://127.0.0.1:8083/v1`) для сторонних клиентов (Roo Code, Cline, Cursor, Continue и др.).
+- **Канал разработчика в Telegram:** новости, обновления и инсайты публикуются в [https://t.me/iqsklad20](https://t.me/iqsklad20).
 
-### Подключение Antigravity и сторонних IDE
+#### Подключение и использование
 
-1. **Antigravity IDE (нативное подключение):**
-   - Запусти шлюз (пункт `1` в меню Argon);
-   - Включи маршрутизацию (пункт `7` в меню Argon: `Toggle Antigravity Route`);
-   - Перезапусти Antigravity IDE;
-   - Модель `Gemini 4 Argon` разблокирована и активна прямо в нативном выпадающем меню!
+1. **Включение в Antigravity IDE:**
+   - Запусти `geminUp.bat` -> выбери пункт `8` (`Jewish Tokenizer: Context Compression Proxy`);
+   - Включи маршрутизацию (пункт `7`: `Toggle Antigravity Route`);
+   - Перезапусти Antigravity IDE.
 2. **OpenAI-совместимые клиенты (Roo Code / Cline / Cursor / OpenCode):**
    - Base URL: `http://127.0.0.1:8083/v1`
    - API Key: `geminup` (любая строка)
-   - Model ID: `gemini-4-argon` (или `gemini-4-argon-thinking-medium`, `gemini-3.8-flash`, `gemini-3.1-pro`)
-
-Поддерживаются форматы:
-
-```text
-host:port:username:password
-socks5://username:password@host:port
-```
-
-Если логин или пароль содержит двоеточие либо специальные символы, используй URL-форму с percent-encoding.
-
-После зелёного `SUCCESSFUL` полностью перезапусти открытые браузеры и Antigravity, чтобы оборвать старые прямые соединения.
+   - Model ID: `gemini-2.5-pro` (или любая доступная модель)
 
 ## Как применить обновление Windows-версии
 
@@ -264,7 +249,7 @@ cd android
 
 [![Telegram Channel](https://img.shields.io/badge/Telegram-Developer%20Channel-blue?logo=telegram)](https://t.me/iqsklad20)
 
-`geminUp` is an open-source project for accessing Google Gemini through a user-provided SOCKS5 proxy and autonomous Gemini 4 Argon gateway.
+`geminUp` is an open-source project for accessing Google Gemini through a user-provided SOCKS5 proxy and the local Jewish Tokenizer context compression proxy.
 
 The project includes two independent components:
 
@@ -309,6 +294,17 @@ The app requests only `INTERNET` and `ACCESS_NETWORK_STATE`. It does not request
 4. Run `geminUp.bat` and approve the UAC prompt.
 5. Select option `1` and enter a SOCKS5 proxy.
 
+Supported formats:
+
+```text
+host:port:username:password
+socks5://username:password@host:port
+```
+
+If the username or password contains a colon or special characters, use the URL form with percent-encoding.
+
+After the green `SUCCESSFUL` message appears, fully restart all open browsers and Antigravity to terminate existing direct connections.
+
 Do not download only `geminUp.bat` from the source tree: it requires the adjacent PowerShell controller, C# core, and domain lists.
 
 ### Single-file bootstrap
@@ -331,60 +327,34 @@ Download and run `geminUp-bootstrap.bat`. It will:
 5. Enable YouTube routing
 6. Patch Antigravity binaries
 7. Roll back Antigravity binary patch
-8. Gemini 4 Argon pipeline (Native Gateway Engine)
+8. Jewish Tokenizer: Context Compression Proxy
 ```
 
 Option 5 toggles between `Enable YouTube routing` and `Disable YouTube routing`. It is disabled by default, persists across updates, and can be changed without entering the SOCKS5 proxy again. After changing it, fully restart all open browsers so they close existing connections.
 
 Items 6 and 7 patch `language_server*.exe` and `agy.exe`: the protobuf field `ineligible` is rewritten as `inexigible`. The strings are the same length, so the file size and layout do not change. Enable and Refresh apply the patch automatically; item 6 runs it on its own, and item 7 restores `ineligible`. The same rewrite clears other Antigravity client errors tied to that field, including the ineligible-account state (`SET_INELIGIBLE` / `ineligibleTiers`). If the install is not found, the menu asks for the binary or its folder. Prefix a folder with `scan ` only when the usual locations are not enough.
 
-Option 8 opens the autonomous local Gemini 4 Argon gateway menu (100% local, confidential, zero external dependencies). It runs a native background daemon on `127.0.0.1:8083` featuring a breakthrough architectural design:
-- **Native Antigravity Model Unlocking:** when routing is enabled, the gateway strips the `"tagTitle": "Unavailable"` status and emits `"disabled": false`, naturally unlocking `gemini-4-argon` directly in the native Antigravity model dropdown.
-- **Antigravity Agent Mode Quota (`action: 12`):** Protobuf RPC frames force Google's backend to consume the extended Antigravity Agent quota instead of the restrictive 5-hour web chat limit (`action: 2`).
-- **Seamless Claude & Gemini Transparent Routing:** requests specifying Claude models (Sonnet 3.7 / Opus) or Gemini are transparently routed through the local Argon pipeline for maximum intelligence.
-- **Concurrent Chats & Subagent Isolation:** every turn operates completely stateless on Google Web RPC (`temporary: true`, unique turn UUID). Because conversation trajectory is retained strictly client-side by the IDE, multiple concurrent chat tabs and parallel subagents run in complete isolation with zero context collision or leakage.
-- **Sticky Account Pool with Zero-Lag Responses:** holds an active account affinity for instant 1–2s turns, failing over smoothly to standby accounts in `%ProgramData%\geminUp\argon\accounts.json` on HTTP 429 without dropping conversational context.
-- **Continuous Rolling Keep-Alive:** periodic background heartbeat calls (`qpEbW`) automatically ingest updated `__Secure-1PSIDTS` cookies from Google, preventing session expiration.
-- **Rich CLI Quota Monitors:** live console indicators track remaining Antigravity Agent Mode (`action: 12`) and Web Chat (`action: 2`) quotas alongside reset countdowns.
-- **Dual API Surface:** supports native Antigravity Cloud Code protocol (`/v1internal:*`) and standard OpenAI-compatible API (`http://127.0.0.1:8083/v1`) for external tools (Roo Code, Cline, Cursor, Continue, etc.).
-- **Developer Telegram Channel:** announcements, updates, and deep dives are shared at [https://t.me/iqsklad20](https://t.me/iqsklad20).
+### 8. Jewish Tokenizer: Context Compression Proxy
 
-### Adding Google Accounts to Argon Pool (Step-by-step)
+An autonomous local context compression proxy for Google Antigravity IDE that saves up to 90% of tokens across long multi-turn sessions.
 
-1. Open a standard browser window and sign in to [gemini.google.com](https://gemini.google.com) with your Google account.
-2. **Export using cookies.txt extension (Recommended):**
-   - Install the [cookies.txt](https://github.com/hrdl-github/cookies-txt) extension (exports standard Netscape HTTP Cookie format);
-   - Open `gemini.google.com`, click the extension icon and download `cookies.txt` (or copy its text);
-   - In `geminUp.bat` -> Option `8` -> `2`, choose `1` (Read from Clipboard) or `2` (Read from file) and specify the path.
-3. **Alternative method (via DevTools without extensions):**
-   - Press `F12` (DevTools) -> navigate to `Network` -> refresh (`F5`) -> click any request to `gemini.google.com`;
-   - Under `Request Headers`, find the `Cookie` header, right-click, and select **Copy Value**;
-   - Paste the cookie string into geminUp via clipboard.
-4. The gateway will automatically extract the authentication tokens (`__Secure-1PSID`, `SAPISID`, `SID`, etc.), verify the session against Google servers, inspect account quotas, and securely store the account in `%ProgramData%\geminUp\argon\accounts.json`.
-5. To configure a failover cluster, repeat the process with a secondary or backup Google account. If your primary account hits a 429 quota limit, the gateway will fail over to standby accounts automatically.
+- **Saves Up to 90% of Tokens:** automatically prevents context window explosion during extended coding iterations, eliminating redundant payload overhead while preserving conversational coherence.
+- **Transparent Account Handling:** authentication, quota monitoring, and account operations in Antigravity pass directly through without interference.
+- **MCP Memory Integration:** indexes dialogue history and provides instant on-demand retrieval through the integrated `jigit-memory` MCP server.
+- **100% Local & Confidential:** runs locally on `127.0.0.1:8083` with zero external service dependencies, zero cookies, and no third-party accounts required.
+- **Dual API Surface:** supports both native Antigravity Cloud Code protocol and standard OpenAI-compatible endpoints (`http://127.0.0.1:8083/v1`) for external coding assistants (Roo Code, Cline, Cursor, Continue, etc.).
+- **Developer Telegram Channel:** announcements and updates are shared at [https://t.me/iqsklad20](https://t.me/iqsklad20).
 
-### IDE Integration Setup
+#### Setup & Usage
 
-1. **Antigravity IDE (Native Connection):**
-   - Start Argon Gateway (Option `1` in Argon menu);
-   - Activate routing (Option `7` in Argon menu: `Toggle Antigravity Route`);
-   - Restart Antigravity IDE;
-   - `Gemini 4 Argon` is now active and selectable directly in Antigravity's model selector!
+1. **Native Antigravity Connection:**
+   - Launch `geminUp.bat` -> select Option `8` (`Jewish Tokenizer: Context Compression Proxy`);
+   - Enable routing (Option `7`: `Toggle Antigravity Route`);
+   - Restart Antigravity IDE.
 2. **OpenAI-Compatible Tools (Roo Code / Cline / Cursor / OpenCode):**
    - Base URL: `http://127.0.0.1:8083/v1`
    - API Key: `geminup` (any string)
-   - Model ID: `gemini-4-argon` (or `gemini-4-argon-thinking-medium`, `gemini-3.8-flash`, `gemini-3.1-pro`)
-
-Supported formats:
-
-```text
-host:port:username:password
-socks5://username:password@host:port
-```
-
-If the username or password contains a colon or special characters, use the URL form with percent-encoding.
-
-After the green `SUCCESSFUL` message appears, fully restart all open browsers and Antigravity to terminate existing direct connections.
+   - Model ID: `gemini-2.5-pro` (or any available model)
 
 ## Updating the Windows version
 
