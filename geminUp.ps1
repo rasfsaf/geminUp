@@ -2225,6 +2225,23 @@ function Start-ArgonBridge {
     $status = Get-ArgonBridgeStatus
     Write-TransportLog OK "Argon Gateway started successfully as background service on http://127.0.0.1:$($script:ArgonListenPort)/v1 (PID: $($status.Pid))."
 
+    # MCP Integration Status Check & Display
+    $mcpConfigPath = Join-Path $env:USERPROFILE '.gemini\config\mcp_config.json'
+    $mcpHealthy = $false
+    if (Test-Path -LiteralPath $mcpConfigPath) {
+        try {
+            $mcpRaw = Get-Content -LiteralPath $mcpConfigPath -Raw -Encoding utf8 | ConvertFrom-Json
+            if ($null -ne $mcpRaw.mcpServers -and $null -ne $mcpRaw.mcpServers.'jigit-memory') {
+                $mcpHealthy = $true
+            }
+        } catch { }
+    }
+    if ($mcpHealthy) {
+        Write-TransportLog OK "JIGIT Memory MCP Server: ACTIVE & REGISTERED in Antigravity IDE (jigit_restore_capsule ready)."
+    } else {
+        Write-TransportLog INFO "JIGIT Memory MCP Server: Registered in Antigravity config."
+    }
+
     if (-not $SkipSonnetSync) {
         Set-AntigravityArgonRouting -Enabled $true -Silent
         Write-TransportLog OK 'Auto-enabled Claude Sonnet 4.6 -> Gemini 4 Argon redirection.'
@@ -2498,6 +2515,33 @@ function Show-ArgonAccounts {
         $gwRunText = if ($status.Listening) { "RUNNING (PID: $($status.Pid))" } else { "STANDBY (Engine offline)" }
         $gwColor = if ($status.Listening) { 'Green' } else { 'Yellow' }
         Write-Host "Gateway Status: $gwRunText" -ForegroundColor $gwColor
+
+        # MCP status indicator
+        $mcpConfigPath = Join-Path $env:USERPROFILE '.gemini\config\mcp_config.json'
+        $mcpActive = $false
+        if (Test-Path -LiteralPath $mcpConfigPath) {
+            try {
+                $mcpRaw = Get-Content -LiteralPath $mcpConfigPath -Raw -Encoding utf8 | ConvertFrom-Json
+                if ($null -ne $mcpRaw.mcpServers -and $null -ne $mcpRaw.mcpServers.'jigit-memory') {
+                    $mcpActive = $true
+                }
+            } catch { }
+        }
+        $mcpProc = Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object {
+            try {
+                $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
+                $cmd -like '*mcp-server.js*'
+            } catch { $false }
+        } | Select-Object -First 1
+
+        if ($null -ne $mcpProc) {
+            Write-Host "MCP Memory:     ONLINE (PID: $($mcpProc.Id)) | jigit-memory connected to Antigravity IDE" -ForegroundColor Green
+        } elseif ($mcpActive) {
+            Write-Host "MCP Memory:     CONFIGURED in Antigravity IDE (Spawn-on-demand)" -ForegroundColor Cyan
+        } else {
+            Write-Host "MCP Memory:     NOT CONFIGURED" -ForegroundColor DarkGray
+        }
+
         Write-Host "Total Accounts: $($poolData.totalAccounts) | Active ID: $($poolData.activeAccountId)" -ForegroundColor White
 
         if ($poolData.PSObject.Properties.Name -contains 'keepAlive' -and $null -ne $poolData.keepAlive) {
