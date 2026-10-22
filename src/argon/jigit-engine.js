@@ -64,6 +64,51 @@ function compactFileBlock(filepath, content, capsuleId, options = {}) {
   return `[JIGIT Engine: Compacted ${label} (${totalLength} bytes; capsule=${capsuleId}). Use MCP tool jigit_restore_capsule('${capsuleId}') to inspect full original content. Preview:\n${preview}\n... [${totalLength - preview.length - tail.length} bytes omitted for low latency] ...\n${tail}]`;
 }
 
+function breakRepetitiveLoops(text) {
+  if (typeof text !== 'string' || text.length < 100) return text;
+
+  // 1. Line-level repetition collapse
+  const lines = text.split('\n');
+  if (lines.length >= 4) {
+    const deduped = [];
+    let repeatCount = 0;
+    let prevLine = null;
+    let changed = false;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed && trimmed.length > 20 && trimmed === prevLine) {
+        repeatCount++;
+        changed = true;
+      } else {
+        if (repeatCount >= 2) {
+          deduped.push(`[JIGIT: Repetitive reasoning loop collapsed (${repeatCount} redundant lines purged)]`);
+        }
+        repeatCount = 0;
+        prevLine = trimmed.length > 20 ? trimmed : null;
+        deduped.push(line);
+      }
+    }
+    if (repeatCount >= 2) {
+      deduped.push(`[JIGIT: Repetitive reasoning loop collapsed (${repeatCount} redundant lines purged)]`);
+    }
+    if (changed) {
+      text = deduped.join('\n');
+    }
+  }
+
+  // 2. Continuous phrase/sentence repetition collapse (mode collapse)
+  const loopRegex = /((?:.{20,250}?))(?:\s*\1){2,}/gis;
+  if (loopRegex.test(text)) {
+    text = text.replace(loopRegex, (match, unit) => {
+      const count = Math.max(2, Math.round(match.length / unit.length));
+      return `${unit.trim()}\n[JIGIT: Repetitive reasoning loop collapsed (${count} redundant cycles purged)]\n`;
+    });
+  }
+
+  return text;
+}
+
 function compactNoiseText(text, category = 'Diagnostic Log', options = {}) {
   if (text.length <= 1200) return text;
   const capsuleId = getDeterministicCapsuleId(text);
@@ -105,36 +150,44 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
 
   // Handle plain text property
   if (typeof turn.text === 'string' && !turn.parts && !turn.content) {
-    if (!isRecent && !isInitial && turn.text.length > 2500) {
-      const compacted = compactNoiseText(turn.text, 'Historical Message', options);
-      if (tracker && compacted !== turn.text) {
+    let currentText = breakRepetitiveLoops(turn.text);
+    if (!isRecent && !isInitial && currentText.length > 2500) {
+      const compacted = compactNoiseText(currentText, 'Historical Message', options);
+      if (tracker && compacted !== currentText) {
         tracker.recordItem({
           type: 'Historical Message',
           name: 'turn.text',
-          originalSize: turn.text.length,
+          originalSize: currentText.length,
           compactedSize: compacted.length,
-          capsuleId: getDeterministicCapsuleId(turn.text),
+          capsuleId: getDeterministicCapsuleId(currentText),
         });
       }
       return { ...turn, text: compacted };
+    }
+    if (currentText !== turn.text) {
+      return { ...turn, text: currentText };
     }
     return turn;
   }
 
   // Handle string content property (OpenAI format)
   if (typeof turn.content === 'string' && !turn.parts) {
-    if (!isRecent && !isInitial && turn.content.length > 2500) {
-      const compacted = compactNoiseText(turn.content, 'Historical Message', options);
-      if (tracker && compacted !== turn.content) {
+    let currentContent = breakRepetitiveLoops(turn.content);
+    if (!isRecent && !isInitial && currentContent.length > 2500) {
+      const compacted = compactNoiseText(currentContent, 'Historical Message', options);
+      if (tracker && compacted !== currentContent) {
         tracker.recordItem({
           type: 'Historical Message',
           name: 'turn.content',
-          originalSize: turn.content.length,
+          originalSize: currentContent.length,
           compactedSize: compacted.length,
-          capsuleId: getDeterministicCapsuleId(turn.content),
+          capsuleId: getDeterministicCapsuleId(currentContent),
         });
       }
       return { ...turn, content: compacted };
+    }
+    if (currentContent !== turn.content) {
+      return { ...turn, content: currentContent };
     }
     return turn;
   }
@@ -239,9 +292,57 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
       return part;
     }
 
-    // C. Text parts with noise or huge code dumps
+    // C. Model reasoning / thinking parts (archive historical thinking & break runaway loops)
+    if (part.thought === true || part.type === 'thinking') {
+      const thoughtText = typeof part.text === 'string' ? part.text : (typeof part.thinking === 'string' ? part.thinking : '');
+      if (!isRecent && thoughtText && thoughtText.length > 80) {
+        const capsuleId = getDeterministicCapsuleId(thoughtText);
+        saveCapsule(capsuleId, thoughtText, { category: 'Historical Thought', conversationId: options.conversationId });
+        const compacted = `[JIGIT: Historical reasoning trajectory archived (${thoughtText.length} chars; capsule=${capsuleId})]`;
+        if (tracker) {
+          tracker.recordItem({
+            type: 'Historical Thought',
+            name: 'turn.parts.thought',
+            originalSize: thoughtText.length,
+            compactedSize: compacted.length,
+            capsuleId,
+          });
+        }
+        return {
+          ...part,
+          text: compacted,
+        };
+      }
+      if (thoughtText && thoughtText.length > 100) {
+        const broken = breakRepetitiveLoops(thoughtText);
+        if (broken !== thoughtText) {
+          if (tracker) {
+            tracker.recordItem({
+              type: 'Thought Loop Breaker',
+              name: 'turn.parts.thought',
+              originalSize: thoughtText.length,
+              compactedSize: broken.length,
+              capsuleId: getDeterministicCapsuleId(thoughtText),
+            });
+          }
+          return { ...part, text: broken };
+        }
+      }
+    }
+
+    // D. Text parts with noise, huge code dumps, or repeating loops
     if (typeof part.text === 'string') {
-      const txt = part.text;
+      let txt = breakRepetitiveLoops(part.text);
+      if (tracker && txt !== part.text) {
+        tracker.recordItem({
+          type: 'Loop Breaker',
+          name: 'turn.parts.text',
+          originalSize: part.text.length,
+          compactedSize: txt.length,
+          capsuleId: getDeterministicCapsuleId(part.text),
+        });
+      }
+
       if (!isRecent && !isInitial && txt.length > 2500) {
         if (isNoiseContent(txt)) {
           const compacted = compactNoiseText(txt, 'Console/Diagnostic Log', options);
@@ -272,9 +373,12 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
           return { ...part, text: compacted };
         }
       }
+      if (txt !== part.text) {
+        return { ...part, text: txt };
+      }
     }
 
-    // D. Native Gemini inlineData (Images & Binary Attachments)
+    // E. Native Gemini inlineData (Images & Binary Attachments)
     if (part.inlineData && typeof part.inlineData === 'object') {
       const inline = part.inlineData;
       const dataStr = typeof inline.data === 'string' ? inline.data : '';
