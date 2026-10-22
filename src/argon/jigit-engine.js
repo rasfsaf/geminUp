@@ -149,9 +149,15 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
   }
 
   // Handle plain text property
+  const isModelRole = turn.role === 'model' || turn.role === 'assistant';
+
   if (typeof turn.text === 'string' && !turn.parts && !turn.content) {
     let currentText = breakRepetitiveLoops(turn.text);
-    if (!isRecent && !isInitial && currentText.length > 2500) {
+    if (isModelRole && currentText.includes('[JIGIT Engine:')) {
+      currentText = currentText.replace(/\[JIGIT Engine:[\s\S]*?\]\s*/g, '').trim();
+    }
+
+    if (!isModelRole && !isRecent && !isInitial && currentText.length > 2500) {
       const compacted = compactNoiseText(currentText, 'Historical Message', options);
       if (tracker && compacted !== currentText) {
         tracker.recordItem({
@@ -173,7 +179,11 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
   // Handle string content property (OpenAI format)
   if (typeof turn.content === 'string' && !turn.parts) {
     let currentContent = breakRepetitiveLoops(turn.content);
-    if (!isRecent && !isInitial && currentContent.length > 2500) {
+    if (isModelRole && currentContent.includes('[JIGIT Engine:')) {
+      currentContent = currentContent.replace(/\[JIGIT Engine:[\s\S]*?\]\s*/g, '').trim();
+    }
+
+    if (!isModelRole && !isRecent && !isInitial && currentContent.length > 2500) {
       const compacted = compactNoiseText(currentContent, 'Historical Message', options);
       if (tracker && compacted !== currentContent) {
         tracker.recordItem({
@@ -353,6 +363,16 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
 
       if (!txt) {
         return null;
+      }
+
+      // Model/Assistant turns represent communication to the user.
+      // Strip any residual JIGIT banner if previously saved to context history,
+      // and NEVER compact the assistant's own explanation or code answers into capsules!
+      if (isModelRole) {
+        if (txt.includes('[JIGIT Engine:')) {
+          txt = txt.replace(/\[JIGIT Engine:[\s\S]*?\]\s*/g, '').trim();
+        }
+        return { ...part, text: txt };
       }
 
       if (!isRecent && !isInitial && txt.length > 2500) {

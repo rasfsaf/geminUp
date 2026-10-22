@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [2.0.3] - 2026-10-22
+
+### RU (Русский)
+
+#### Защита ответов ассистента и ликвидация утечки сервисных плашек в чат
+- **Полная неприкосновенность реплик ассистента:** Устранена утечка плашек `[JIGIT Engine: Compacted File/Code Dump ...]`. Движок `jigit-engine.js` теперь строго защищает сообщения модели (`role: 'model'`). Ответы и блоки кода, адресованные пользователю, больше никогда не сжимаются в капсулы. Сжатию подлежат исключительно технические выхлопы инструментов и логи (`functionResponse`, `tool_result`).
+- **Автоматическая очистка остаточных плашек из истории:** Внедрён очищающий фильтр, который на лету удаляет старые сервисные плашки из контекста диалога, лишая модель возможности заучивать и копировать их в свои новые реплики.
+- **Юнит-тест верификации чистоты текста:** Добавлен специализированный тест `test_banner_strip.js`, гарантирующий отсутствие артефактов в диалоге.
+
+### EN (English)
+
+#### Assistant Message Protection and Placeholder Banner Elimination
+- **Strict Assistant Message Preservation:** Resolved an issue where internal `[JIGIT Engine: ...]` placeholders leaked into user-facing chat responses. `jigit-engine.js` now strictly protects assistant turns (`role: 'model'`), ensuring answers and code blocks directed to the user are never compressed. Only raw tool executions and diagnostic outputs (`functionResponse`, `tool_result`) are eligible for capsule offloading.
+- **In-Flight Banner Sanitization:** Added an automatic regex sanitizer that purges historical placeholder artifacts from conversation history turns, preventing the LLM from hallucinating them as response prefixes.
+- **Automated Banner Test:** Added `test_banner_strip.js` to verify zero artifact leakage into conversational responses.
+
+---
+
 ## [2.0.2] - 2026-10-22
 
 ### RU (Русский)
