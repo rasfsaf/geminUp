@@ -292,47 +292,55 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
       return part;
     }
 
-    // C. Model reasoning / thinking parts (archive historical thinking & break runaway loops)
+    // C. Model reasoning / thinking scratchpads:
+    // Thoughts are ephemeral scratchpads for the active turn and MUST NOT be preserved
+    // in multi-turn conversation history. Completely strip them from the wire payload
+    // and archive into JIGIT Capsule Store for transparent debugging via MCP.
     if (part.thought === true || part.type === 'thinking') {
       const thoughtText = typeof part.text === 'string' ? part.text : (typeof part.thinking === 'string' ? part.thinking : '');
-      if (!isRecent && thoughtText && thoughtText.length > 80) {
-        const capsuleId = getDeterministicCapsuleId(thoughtText);
-        saveCapsule(capsuleId, thoughtText, { category: 'Historical Thought', conversationId: options.conversationId });
-        const compacted = `[JIGIT: Historical reasoning trajectory archived (${thoughtText.length} chars; capsule=${capsuleId})]`;
-        if (tracker) {
-          tracker.recordItem({
-            type: 'Historical Thought',
-            name: 'turn.parts.thought',
-            originalSize: thoughtText.length,
-            compactedSize: compacted.length,
-            capsuleId,
-          });
-        }
-        return {
-          ...part,
-          text: compacted,
-        };
+      const originalLen = thoughtText ? thoughtText.length : 0;
+      let capsuleId = '';
+      if (originalLen > 0) {
+        capsuleId = getDeterministicCapsuleId(thoughtText);
+        saveCapsule(capsuleId, thoughtText, {
+          category: 'Historical Thought',
+          conversationId: options.conversationId || null,
+        });
       }
-      if (thoughtText && thoughtText.length > 100) {
-        const broken = breakRepetitiveLoops(thoughtText);
-        if (broken !== thoughtText) {
-          if (tracker) {
-            tracker.recordItem({
-              type: 'Thought Loop Breaker',
-              name: 'turn.parts.thought',
-              originalSize: thoughtText.length,
-              compactedSize: broken.length,
-              capsuleId: getDeterministicCapsuleId(thoughtText),
-            });
-          }
-          return { ...part, text: broken };
-        }
+      if (tracker && originalLen > 0) {
+        tracker.recordItem({
+          type: 'Thought Stripped',
+          name: 'turn.parts.thought',
+          originalSize: originalLen,
+          compactedSize: 0,
+          capsuleId: capsuleId || 'none',
+        });
       }
+      return null;
     }
 
-    // D. Text parts with noise, huge code dumps, or repeating loops
+    // D. Text parts with noise, huge code dumps, XML thinking tags, or repeating loops
     if (typeof part.text === 'string') {
-      let txt = breakRepetitiveLoops(part.text);
+      let txt = part.text;
+
+      // Clean residual XML thinking tags if present (<thought>...</thought> / <thinking>...</thinking>)
+      if (txt.includes('<thought>') || txt.includes('<thinking>')) {
+        const preLen = txt.length;
+        txt = txt.replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+                 .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+                 .trim();
+        if (tracker && txt.length !== preLen) {
+          tracker.recordItem({
+            type: 'Thought Stripped',
+            name: 'inline <thought> tags',
+            originalSize: preLen,
+            compactedSize: txt.length,
+            capsuleId: getDeterministicCapsuleId(part.text),
+          });
+        }
+      }
+
+      txt = breakRepetitiveLoops(txt);
       if (tracker && txt !== part.text) {
         tracker.recordItem({
           type: 'Loop Breaker',
@@ -341,6 +349,10 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
           compactedSize: txt.length,
           capsuleId: getDeterministicCapsuleId(part.text),
         });
+      }
+
+      if (!txt) {
+        return null;
       }
 
       if (!isRecent && !isInitial && txt.length > 2500) {
@@ -452,7 +464,14 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
     return part;
   });
 
-  return { ...turn, parts: optimizedParts };
+  const filteredParts = optimizedParts.filter(Boolean);
+  const isOriginalContentArray = Array.isArray(turn.content) && !turn.parts;
+  const safeParts = filteredParts.length > 0 ? filteredParts : [{ text: '[Turn completed]' }];
+
+  if (isOriginalContentArray) {
+    return { ...turn, content: safeParts };
+  }
+  return { ...turn, parts: safeParts };
 }
 
 /**
