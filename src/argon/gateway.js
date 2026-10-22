@@ -1249,11 +1249,12 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
   const isArgon = rawModel.includes('argon') || deepJsonStr.includes('gemini-4-argon');
   const isSonnet = rawModel.includes('sonnet') || rawModel.includes('claude') || rawModel.includes('opus') || deepJsonStr.includes('claude-sonnet') || deepJsonStr.includes('sonnet');
-  const isFlashRedirect = redirectConfig.redirectFlashToPool && (rawModel.includes('flash') || deepJsonStr.includes('flash'));
+  const isDedicatedFlash = rawModel.includes('gemini-3.8-flash') || rawModel.includes('ultra-quota') || deepJsonStr.includes('gemini-3.8-flash');
+  const isGlobalFlashRedirect = redirectConfig.redirectFlashToPool && (rawModel.includes('flash') || deepJsonStr.includes('flash'));
+  const isFlash = isDedicatedFlash || isGlobalFlashRedirect;
 
-  // Mandatory policy: Claude Sonnet is ALWAYS mapped to Gemini 4 Argon whenever Argon Gateway is running.
-  // It cannot be toggled off independently; it lives strictly with the gateway lifecycle.
-  const isTargeted = isArgon || isSonnet || isFlashRedirect;
+  // Intercept Argon, Sonnet (always mapped to Argon Ultra-Quota), and Flash models to serve via Ultra-Quota pool with JIGIT Engine compression
+  const isTargeted = isArgon || isSonnet || isFlash;
 
   // If this model is not targeted for pool routing, pass through to Google Cloud Code (routed via SOCKS5 tunnel)
   if (!isTargeted) {
