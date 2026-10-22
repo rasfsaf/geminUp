@@ -1297,30 +1297,41 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
   const redirectConfig = getRedirectConfig();
   dumpDebugPayload('handleCloudCodeGenerateContent', req, bodyJson, rawBuf);
 
-  // Search comprehensively for model identifiers across top-level, request wrapper, modelConfig, or deep fields
+  // Search comprehensively for model identifiers only across structural model fields (NEVER conversation history text)
   const reqObj = (bodyJson && typeof bodyJson === 'object') ? (bodyJson.request || bodyJson) : {};
-  const deepJsonStr = typeof bodyJson === 'object' ? JSON.stringify(bodyJson).slice(0, 3000).toLowerCase() : '';
   const rawModel = String(
-    reqObj.model ||
-    reqObj.modelName ||
-    reqObj.modelId ||
-    reqObj.model_id ||
     bodyJson?.model ||
+    reqObj.model ||
     bodyJson?.modelName ||
+    reqObj.modelName ||
+    bodyJson?.modelId ||
+    reqObj.modelId ||
     bodyJson?.model_id ||
+    reqObj.model_id ||
     bodyJson?.modelConfiguration?.model ||
     reqObj.modelConfiguration?.model ||
+    reqObj.labels?.model_enum ||
     ''
-  ).toLowerCase();
+  ).toLowerCase().trim();
 
-  const isArgon = rawModel.includes('argon') || deepJsonStr.includes('gemini-4-argon');
-  const isSonnet = rawModel.includes('sonnet') || rawModel.includes('claude') || rawModel.includes('opus') || deepJsonStr.includes('claude-sonnet') || deepJsonStr.includes('sonnet');
-  const isDedicatedFlash = rawModel.includes('gemini-3.8-flash') || rawModel.includes('ultra-quota') || deepJsonStr.includes('gemini-3.8-flash');
-  const isGlobalFlashRedirect = redirectConfig.redirectFlashToPool && (rawModel.includes('flash') || deepJsonStr.includes('flash'));
-  const isFlash = isDedicatedFlash || isGlobalFlashRedirect;
+  const headerModel = String(req.headers['x-goog-model'] || req.headers['x-model'] || '').toLowerCase().trim();
+  const effectiveModel = rawModel || headerModel || 'gemini-4-argon';
 
-  // Intercept Argon, Sonnet (always mapped to Argon Ultra-Quota), and Flash models to serve via Ultra-Quota pool with JIGIT Engine compression
-  const isTargeted = isArgon || isSonnet || isFlash;
+  const isSonnet = effectiveModel.includes('sonnet') || effectiveModel.includes('claude') || effectiveModel.includes('opus');
+  const isFlash = effectiveModel.includes('flash');
+  const isPro = effectiveModel.includes('pro');
+  const isArgon = effectiveModel.includes('argon') || (!isSonnet && !isFlash && !isPro);
+
+  const humanModelName = isSonnet
+    ? 'Claude Sonnet 4.6 (Argon Route)'
+    : isFlash
+      ? (effectiveModel.includes('lite') ? 'Gemini 3.5 Flash-Lite' : 'Gemini 3.8 Flash')
+      : isPro
+        ? 'Gemini 3.1 Pro'
+        : 'Gemini 4 Argon';
+
+  // Intercept Argon, Sonnet (always mapped to Argon Ultra-Quota), Flash, and Pro models to serve via Ultra-Quota pool with JIGIT Engine compression
+  const isTargeted = isArgon || isSonnet || isFlash || isPro;
 
   // If this model is not targeted for pool routing, pass through to Google Cloud Code (routed via SOCKS5 tunnel)
   if (!isTargeted) {
@@ -1345,10 +1356,12 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
   if (isSonnet) {
     console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Claude Sonnet 4.6 request -> Redirecting to Gemini 4 Argon Ultra-Quota pool (${pool.accounts.length} accounts active)`);
-  } else if (isArgon) {
-    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini 4 Argon Ultra-Quota request -> Serving with pool (${pool.accounts.length} accounts active)`);
   } else if (isFlash) {
-    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini Flash Ultra-Quota request -> Serving with pool (${pool.accounts.length} accounts active)`);
+    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted ${humanModelName} request -> Serving with pool (${pool.accounts.length} accounts active)`);
+  } else if (isPro) {
+    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini 3.1 Pro request -> Serving with pool (${pool.accounts.length} accounts active)`);
+  } else {
+    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini 4 Argon Ultra-Quota request -> Serving with pool (${pool.accounts.length} accounts active)`);
   }
 
   const sendCloudCodeError = (statusCode, message) => {
@@ -1367,7 +1380,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
             {
               content: {
                 role: 'model',
-                parts: [{ text: `\n\n⚠️ **[geminUp Argon Gateway]**\n\n${message}` }],
+                parts: [{ text: `\n\n⚠️ **[geminUp Gateway: ${humanModelName}]**\n\n${message}` }],
               },
               finishReason: 'STOP',
             },
@@ -1386,7 +1399,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
           {
             content: {
               role: 'model',
-              parts: [{ text: `⚠️ **[geminUp Argon Gateway]**\n\n${message}` }],
+              parts: [{ text: `⚠️ **[geminUp Gateway: ${humanModelName}]**\n\n${message}` }],
             },
             finishReason: 'STOP',
           },
@@ -1400,7 +1413,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
     if (isSonnet || isArgon || redirectConfig.failClosed) {
       const msg = isSonnet
         ? 'Claude Sonnet перенаправлен на Gemini 4 Argon, но все Google-аккаунты в пуле Ultra-Quota сейчас исчерпаны или требуют обновления.\n\nВключен **режим Fail-Closed**, чтобы предотвратить случайный расход квоты Claude Sonnet в IDE.\n\nОбнови куки через: .\\geminUp.ps1 -Action argon-cookie'
-        : 'Все Google-аккаунты в пуле Ultra-Quota сейчас исчерпаны или требуют обновления. Обнови куки через: .\\geminUp.ps1 -Action argon-cookie';
+        : `Все Google-аккаунты в пуле Ultra-Quota для ${humanModelName} сейчас исчерпаны или требуют обновления. Обнови куки через: .\\geminUp.ps1 -Action argon-cookie`;
       return sendCloudCodeError(429, msg);
     }
     return await forwardToGoogleCloudCode(req, res, rawBuf);
@@ -1451,7 +1464,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         await pool.refreshAccountSession(account);
       }
 
-      const upstreamId = resolveModelUpstream(bodyJson.model, account);
+      const upstreamId = resolveModelUpstream(isSonnet ? 'claude-sonnet-4-6' : effectiveModel, account);
       const capacity = account.modelCapacity || 1;
       const capacityField = account.modelCapacityField || 12;
       const modelHeader = buildModelHeader(upstreamId, capacity, capacityField);
@@ -1777,11 +1790,11 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
           if (cleanText && cleanText.trim().length > 0) {
             fallbackText = cleanText.trim();
           } else if (lastStreamError?.upstreamCode === 1155) {
-            fallbackText = '⚠️ [Argon Gateway] Upstream Google Gemini 4 Argon model is temporarily overloaded (Error 1155). Please retry your request in a few moments.';
+            fallbackText = `⚠️ [geminUp Gateway] Upstream Google ${humanModelName} is temporarily overloaded (Error 1155). Please retry your request in a few moments.`;
           } else if (lastStreamError?.message) {
-            fallbackText = `⚠️ [Argon Gateway] Upstream generation failed: ${lastStreamError.message}. Please retry your request.`;
+            fallbackText = `⚠️ [geminUp Gateway] Upstream ${humanModelName} generation failed: ${lastStreamError.message}. Please retry your request.`;
           } else {
-            fallbackText = '⚠️ [Argon Gateway] Upstream Google Gemini 4 Argon model completed without generating output text. Please retry your request.';
+            fallbackText = `⚠️ [geminUp Gateway] Upstream Google ${humanModelName} completed without generating output text. Please retry your request.`;
           }
           const textChunk = {
             response: {
@@ -1902,7 +1915,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
   return sendCloudCodeError(
     502,
-    `[Argon Gateway] Upstream Google Gemini 4 Argon pool request failed (${lastAttemptError || 'Upstream temporarily unavailable'}). Please retry your request.`
+    `[geminUp Gateway] Upstream Google ${humanModelName} pool request failed (${lastAttemptError || 'Upstream temporarily unavailable'}). Please retry your request.`
   );
 }
 
