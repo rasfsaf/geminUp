@@ -1082,9 +1082,9 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
   }
 
   if (isSonnet) {
-    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Claude Sonnet 4.6 request -> Redirecting to Gemini 4 Argon with Agent Mode quota (action: 12)`);
+    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Claude Sonnet 4.6 request -> Redirecting to Gemini 4 Argon Ultra-Quota pool (action: 12, 2400/acct)`);
   } else if (isArgon) {
-    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini 4 Argon request -> Serving with Agent Mode quota (action: 12)`);
+    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini 4 Argon Ultra-Quota request -> Serving with 7-account pool (action: 12, 2400/acct)`);
   } else if (isFlash) {
     console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini Flash Ultra-Quota request -> Serving with 7-account pool`);
   }

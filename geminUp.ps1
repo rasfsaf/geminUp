@@ -1260,7 +1260,7 @@ function Set-AntigravityArgonRouting {
             Write-Host ''
             Write-TransportLog OK 'Claude Sonnet 4.6 -> Gemini 4 Argon Redirection: ENABLED (Fail-Closed mode).'
             Write-Host '  When Claude Sonnet 4.6 is selected in Antigravity, requests are transparently' -ForegroundColor Green
-            Write-Host '  redirected to Gemini 4 Argon with Agent Mode quota (action: 12).' -ForegroundColor Green
+            Write-Host '  redirected to Gemini 4 Argon Ultra-Quota (rotating 7-account pool x 2400 Agent Mode = 16,800/day).' -ForegroundColor Green
             Write-Host '  Gemini 3.8 Flash requests are also powered by the rotating account pool.' -ForegroundColor Green
             Write-Host '  If accounts pool is exhausted, requests fail-closed without hitting Google Cloud.' -ForegroundColor Yellow
             Write-Host '  Restart Antigravity IDE if model status does not update immediately.' -ForegroundColor Yellow
