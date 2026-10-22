@@ -3,6 +3,7 @@ const https = require('node:https');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 
 // Global crash protection against abrupt client socket disconnections
 process.on('uncaughtException', (err) => {
@@ -290,7 +291,9 @@ function formatInlineData(inlineData) {
     : mimeType.includes('gif') ? 'gif'
     : 'png';
 
-  const downloadDir = 'C:\\Users\\0SLEK\\Downloads';
+  const downloadDir = process.env.USERPROFILE
+    ? path.join(process.env.USERPROFILE, 'Downloads')
+    : path.join(os.homedir(), 'Downloads');
   const fileName = `antigravity_attached_${Date.now()}_${crypto.randomBytes(3).toString('hex')}.${ext}`;
   const filePath = path.join(downloadDir, fileName);
 
@@ -741,6 +744,8 @@ async function handleChatCompletions(req, res, bodyJson) {
                 }
               }
             } catch (pErr) {
+              streamError = pErr;
+              console.error(`[Argon Gateway] Upstream stream frame error on account "${account.label}": ${pErr.message}`);
               if (pErr.upstreamStatus === 429) {
                 pool.markExhausted(account.id);
               }
@@ -999,7 +1004,7 @@ async function forwardAvailableModels(req, res, reqBuffer) {
             };
             json.models['gemini-3.8-flash'] = {
               displayName: 'Gemini Flash (geminUp Ultra-Quota)',
-              description: 'Ultra-low latency coding model backed by 7-account rotating pool',
+              description: 'Ultra-low latency coding model backed by rotating Ultra-Quota account pool',
               supportsImages: true,
               supportsThinking: false,
               recommended: false,
@@ -1082,11 +1087,11 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
   }
 
   if (isSonnet) {
-    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Claude Sonnet 4.6 request -> Redirecting to Gemini 4 Argon Ultra-Quota pool (action: 12, 2400/acct)`);
+    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Claude Sonnet 4.6 request -> Redirecting to Gemini 4 Argon Ultra-Quota pool (${pool.accounts.length} accounts active)`);
   } else if (isArgon) {
-    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini 4 Argon Ultra-Quota request -> Serving with 7-account pool (action: 12, 2400/acct)`);
+    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini 4 Argon Ultra-Quota request -> Serving with pool (${pool.accounts.length} accounts active)`);
   } else if (isFlash) {
-    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini Flash Ultra-Quota request -> Serving with 7-account pool`);
+    console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini Flash Ultra-Quota request -> Serving with pool (${pool.accounts.length} accounts active)`);
   }
 
   let account = pool.getActiveAccount();
@@ -1205,6 +1210,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         let accumulatedThoughts = '';
         let streamRemainder = '';
         let streamedContentLength = 0;
+        let streamError = null;
 
         // Handle client connection closing prematurely
         req.on('close', () => {
@@ -1278,6 +1284,8 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
                 }
               }
             } catch (pErr) {
+              streamError = pErr;
+              console.error(`[Argon Gateway] Upstream stream frame error on account "${account.label}": ${pErr.message}`);
               if (pErr.upstreamStatus === 429) {
                 pool.markExhausted(account.id);
               }
@@ -1357,11 +1365,16 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
             }
           }
 
-          // Safety guarantee: If no text was streamed and no tool calls, emit clean fallback text so candidate text is never empty
+          // Safety guarantee: If no text was streamed and no tool calls, emit informative diagnostic text so candidate text is never empty
           if (streamedContentLength === 0) {
-            const fallbackText = (cleanText && cleanText.trim().length > 0)
-              ? cleanText.trim()
-              : 'Готово. Пожалуйста, продолжайте.';
+            let fallbackText = '';
+            if (cleanText && cleanText.trim().length > 0) {
+              fallbackText = cleanText.trim();
+            } else if (streamError) {
+              fallbackText = `[Argon Gateway Upstream Error: ${streamError.message} (Account: ${account.label}). Пожалуйста, проверьте статус аккаунта в пуле или повторите запрос.]`;
+            } else {
+              fallbackText = '[Argon Gateway: Upstream Gemini model completed without generating output text. Пожалуйста, повторите запрос.]';
+            }
             const textChunk = {
               response: {
                 candidates: [
@@ -1430,7 +1443,9 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
           });
         }
       } else if (parts.length === 0) {
-        const fallback = (cleanText && cleanText.trim().length > 0) ? cleanText.trim() : 'Готово. Пожалуйста, продолжайте.';
+        const fallback = (cleanText && cleanText.trim().length > 0)
+          ? cleanText.trim()
+          : '[Argon Gateway: Upstream Gemini model returned empty response. Пожалуйста, повторите запрос.]';
         parts.push({ text: fallback });
       }
 

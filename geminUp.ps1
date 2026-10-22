@@ -1196,7 +1196,8 @@ function Switch-AntigravityVisionRouting {
         Write-TransportLog OK 'Vision Mode: DIRECT CLOUD CODE MULTIMODAL.'
         Write-Host '  Requests with attached images are routed directly to Google Cloud Code for native pixel-level vision.' -ForegroundColor Green
     } else {
-        Write-TransportLog OK 'Vision Mode: LOCAL DISK BRIDGE (C:\Users\0SLEK\Downloads).'
+        $userDownloads = [IO.Path]::Combine($env:USERPROFILE, 'Downloads')
+        Write-TransportLog OK "Vision Mode: LOCAL DISK BRIDGE ($userDownloads)."
         Write-Host '  Attached images are automatically saved to Downloads and injected with file paths for workspace tool inspection.' -ForegroundColor White
     }
     Write-Host ''
@@ -1209,7 +1210,7 @@ function Switch-AntigravityFlashRouting {
     Write-Host ''
     if ($newState) {
         Write-TransportLog OK 'Gemini Flash -> Ultra-Quota Pool Redirection: ENABLED.'
-        Write-Host '  All Flash requests in Antigravity are now routed through the 7-account pool.' -ForegroundColor Green
+        Write-Host '  All Flash requests in Antigravity are now routed through the rotating Ultra-Quota pool.' -ForegroundColor Green
     } else {
         Write-TransportLog OK 'Gemini Flash -> Ultra-Quota Pool Redirection: OPTIONAL (Dedicated model only).'
         Write-Host '  Standard Flash requests go direct to Cloud Code; dedicated "Gemini Flash (geminUp Ultra-Quota)" uses the pool.' -ForegroundColor White
@@ -1260,7 +1261,7 @@ function Set-AntigravityArgonRouting {
             Write-Host ''
             Write-TransportLog OK 'Claude Sonnet 4.6 -> Gemini 4 Argon Redirection: ENABLED (Fail-Closed mode).'
             Write-Host '  When Claude Sonnet 4.6 is selected in Antigravity, requests are transparently' -ForegroundColor Green
-            Write-Host '  redirected to Gemini 4 Argon Ultra-Quota (rotating 7-account pool x 2400 Agent Mode = 16,800/day).' -ForegroundColor Green
+            Write-Host '  redirected to Gemini 4 Argon Ultra-Quota (rotating account pool with Agent Mode quota).' -ForegroundColor Green
             Write-Host '  Gemini 3.8 Flash requests are also powered by the rotating account pool.' -ForegroundColor Green
             Write-Host '  If accounts pool is exhausted, requests fail-closed without hitting Google Cloud.' -ForegroundColor Yellow
             Write-Host '  Restart Antigravity IDE if model status does not update immediately.' -ForegroundColor Yellow
@@ -2783,7 +2784,7 @@ function Show-ArgonMenu {
         $routingColor = if ($isRouted) { 'Green' } else { 'DarkGray' }
 
         $flashRedirect = Get-FlashRedirectState
-        $flashRouting = if ($flashRedirect) { 'ALL FLASH -> ULTRA-QUOTA POOL (7 Accounts)' } else { 'DIRECT CLOUD CODE (Dedicated model available)' }
+        $flashRouting = if ($flashRedirect) { "ALL FLASH -> ULTRA-QUOTA POOL ($($status.AccountsCount) Accounts)" } else { 'DIRECT CLOUD CODE (Dedicated model available)' }
         $flashColor = if ($flashRedirect) { 'Green' } else { 'Cyan' }
 
         $visionRedirect = Get-VisionRedirectState
