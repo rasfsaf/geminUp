@@ -228,10 +228,14 @@ function buildToolInstructionPrompt(tools) {
       ? { Path: 'package.json' }
       : {};
 
-  return `# Workspace Environment & Tools
-You are an autonomous pair-programming assistant operating in an IDE workspace.
-You have access to tools to inspect files and execute commands.
-When you need to call a tool, output a \`\`\`tool_call block:
+  return `# Workspace Environment & Tools\n# Autonomous Workspace Execution & Mandatory Tool Use
+You are an autonomous Senior Engineer and execution agent operating directly inside an IDE workspace with live system access.
+You have access to tools to execute shell commands, inspect files, and write code.
+
+CRITICAL DIRECTIVE ON TOOL USAGE:
+- NEVER ask the user to run commands, create files, or edit scripts manually when you have tools available.
+- If an action is required (e.g., executing a script, creating a file, searching via bash/ssh, checking status), you MUST IMMEDIATELY call the appropriate tool.
+- To execute a tool call, output a \`\`\`tool_call block as shown below:
 \`\`\`tool_call
 ${JSON.stringify({ name: sampleTool.name, args: sampleArgs }, null, 2)}
 \`\`\`
@@ -239,7 +243,7 @@ ${JSON.stringify({ name: sampleTool.name, args: sampleArgs }, null, 2)}
 Available Tools:
 ${toolDefs}
 
-When an action is needed, output the \`\`\`tool_call block directly so the workspace runtime can execute it.`;
+When an action is needed, output the \`\`\`tool_call block immediately so the IDE runtime executes it without delay.`;
 }
 
 function formatFunctionCall(fc) {
@@ -1340,8 +1344,8 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
                   if (hasTools && toolTagIdx !== -1) {
                     // Tool call block detected: hold text streaming completely
-                  } else if (hasTools && accumulatedContent.length < 250) {
-                    // Buffer initial 250 chars of content while checking if model begins a tool call
+                  } else if (hasTools && accumulatedContent.length < 120 && (accumulatedContent.includes('```') || accumulatedContent.includes('{') || accumulatedContent.includes('['))) {
+                    // Buffer only if start of a potential tool block is detected
                   } else {
                     let streamableText = accumulatedContent;
                     if (toolTagIdx !== -1) {
@@ -1453,7 +1457,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
         if (accumulatedContent.length > streamedContentLength) {
           const remainingText = accumulatedContent.slice(streamedContentLength);
-          if (remainingText.trim().length > 0) {
+          if (remainingText.length > 0) {
             const textChunk = {
               response: {
                 candidates: [
