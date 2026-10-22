@@ -1190,17 +1190,54 @@ async function forwardAvailableModels(req, res, reqBuffer) {
   });
 }
 
+function dumpDebugPayload(prefix, req, bodyJson, rawBuf) {
+  try {
+    const programData = process.env.ProgramData || 'C:\\ProgramData';
+    const debugDir = path.join(programData, 'geminUp', 'argon');
+    if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+    const dumpPath = path.join(debugDir, 'last_intercept_debug.json');
+    const info = {
+      timestamp: new Date().toISOString(),
+      prefix,
+      url: req.url,
+      method: req.method,
+      headers: req.headers,
+      bodyJson,
+      rawLength: rawBuf ? rawBuf.length : 0,
+    };
+    fs.writeFileSync(dumpPath, JSON.stringify(info, null, 2), 'utf8');
+  } catch {}
+}
+
 async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStream = true) {
   const redirectConfig = getRedirectConfig();
-  const rawModel = String(bodyJson.model || bodyJson.request?.model || bodyJson.model_id || 'claude-sonnet-4-6').toLowerCase();
-  const isArgon = rawModel.includes('argon');
-  const isSonnet = rawModel.includes('sonnet');
-  const isDedicatedFlash = rawModel.includes('gemini-3.8-flash') || rawModel.includes('ultra-quota');
-  const isGlobalFlashRedirect = redirectConfig.redirectFlashToPool && rawModel.includes('flash');
+  dumpDebugPayload('handleCloudCodeGenerateContent', req, bodyJson, rawBuf);
+
+  // Search comprehensively for model identifiers across top-level, request wrapper, modelConfig, or deep fields
+  const reqObj = (bodyJson && typeof bodyJson === 'object') ? (bodyJson.request || bodyJson) : {};
+  const deepJsonStr = typeof bodyJson === 'object' ? JSON.stringify(bodyJson).slice(0, 3000).toLowerCase() : '';
+  const rawModel = String(
+    reqObj.model ||
+    reqObj.modelName ||
+    reqObj.modelId ||
+    reqObj.model_id ||
+    bodyJson?.model ||
+    bodyJson?.modelName ||
+    bodyJson?.model_id ||
+    bodyJson?.modelConfiguration?.model ||
+    reqObj.modelConfiguration?.model ||
+    ''
+  ).toLowerCase();
+
+  const isArgon = rawModel.includes('argon') || deepJsonStr.includes('gemini-4-argon');
+  const isSonnet = rawModel.includes('sonnet') || rawModel.includes('claude') || rawModel.includes('opus') || deepJsonStr.includes('claude-sonnet') || deepJsonStr.includes('sonnet');
+  const isDedicatedFlash = rawModel.includes('gemini-3.8-flash') || rawModel.includes('ultra-quota') || deepJsonStr.includes('gemini-3.8-flash');
+  const isGlobalFlashRedirect = redirectConfig.redirectFlashToPool && (rawModel.includes('flash') || deepJsonStr.includes('flash'));
   const isFlash = isDedicatedFlash || isGlobalFlashRedirect;
 
-  // STRICT DEFAULT: Claude Sonnet is ALWAYS intercepted to Gemini 4 Argon Ultra-Quota when Argon is active.
-  const isTargeted = isArgon || isSonnet || isFlash;
+  // STRICT DEFAULT: When redirectSonnetToArgon or Argon is active, Claude Sonnet is ALWAYS intercepted.
+  // If redirectSonnetToArgon is enabled, treat any non-explicit-flash model as Sonnet/Argon to prevent Google baseline quota leaks.
+  const isTargeted = isArgon || isSonnet || isFlash || (redirectConfig.redirectSonnetToArgon && !rawModel.includes('gemini-2') && !rawModel.includes('gemini-1'));
 
   // If this model is not targeted for pool routing, pass through to Google Cloud Code
   if (!isTargeted) {
@@ -1219,8 +1256,8 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
   const tools = extractToolsFromPayload(bodyJson);
   const hasTools = tools.length > 0;
   if (!prompt || !prompt.trim()) {
-    console.warn('[Argon Gateway] No prompt text extracted from payload. Forwarding transparently to Cloud Code upstream.');
-    return await forwardToGoogleCloudCode(req, res, rawBuf);
+    console.warn('[Argon Gateway] No prompt text extracted from payload. Serving fail-closed notice rather than falling back to Google Cloud Code quota.');
+    return sendCloudCodeError(400, 'Не удалось извлечь текст запроса из контекста Antigravity IDE. Повторите запрос.');
   }
 
   if (isSonnet) {
