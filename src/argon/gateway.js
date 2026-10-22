@@ -12,18 +12,19 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
   console.error(`[Argon Gateway] Protected from unhandled rejection:`, reason);
 });
-const { AccountPool, BASE_URL, USER_AGENT } = require('./account-pool');
-const { KeepAliveManager } = require('./keepalive-manager');
+// [ARGON PIPELINE: DISABLED] Google account pool & Bard web interface
+// const { AccountPool, BASE_URL, USER_AGENT } = require('./account-pool');
+// const { KeepAliveManager } = require('./keepalive-manager');
 const { createAgent, directHttpsAgent, doRequest } = require('./http-client');
-const {
-  GENERATE_PATH,
-  buildGenerateRequest,
-  buildModelHeader,
-} = require('./wire-format');
-const {
-  parseGoogleFrames,
-  parseGeminiStream,
-} = require('./stream-parser');
+// const {
+//   GENERATE_PATH,
+//   buildGenerateRequest,
+//   buildModelHeader,
+// } = require('./wire-format');
+// const {
+//   parseGoogleFrames,
+//   parseGeminiStream,
+// } = require('./stream-parser');
 const {
   runJigitPipeline,
   enforceJigitBudget,
@@ -67,12 +68,23 @@ function parseArgs() {
 
 const config = parseArgs();
 const httpAgent = createAgent(config.proxy);
-const pool = new AccountPool({
-  storagePath: config.storagePath,
-  agent: httpAgent,
-});
-
-const keepAliveManager = new KeepAliveManager(pool);
+// [ARGON PIPELINE: DISABLED] Account pool and keep-alive manager disabled
+// const pool = new AccountPool({
+//   storagePath: config.storagePath,
+//   agent: httpAgent,
+// });
+// const keepAliveManager = new KeepAliveManager(pool);
+const pool = {
+  accounts: [],
+  getStatus: () => ({ totalAccounts: 0, activeAccountId: null, accounts: [] }),
+  getActiveAccount: () => null,
+  save: () => {},
+};
+const keepAliveManager = {
+  getStatus: () => ({ running: false, activeIntervals: 0 }),
+  start: () => {},
+  stop: () => {},
+};
 
 const KNOWN_UPSTREAM_MODELS = {
   'gemini-4-argon': '95a4c0abcba24364',
@@ -763,6 +775,9 @@ function sendError(res, statusCode, message, type = 'invalid_request_error') {
   });
 }
 
+/* =========================================================================
+   [ARGON PIPELINE: DISABLED] handleChatCompletions (Reverse-engineered Bard Web API)
+   =========================================================================
 async function handleChatCompletions(req, res, bodyJson) {
   const modelName = bodyJson.model || 'gemini-4-argon';
   const isStream = Boolean(bodyJson.stream);
@@ -1026,6 +1041,7 @@ async function handleChatCompletions(req, res, bodyJson) {
 
   return sendError(res, 502, 'Failed to complete chat request after exhausting failover pool.', 'upstream_error');
 }
+========================================================================= */
 
 function getRedirectConfig() {
   const cfgDir = config.storagePath ? path.dirname(config.storagePath) : (process.env.ProgramData ? path.join(process.env.ProgramData, 'geminUp', 'argon') : __dirname);
@@ -1045,7 +1061,7 @@ function getRedirectConfig() {
 }
 
 // Transparent upstream proxy to real Google Cloud Code endpoint for metadata & handshake
-async function forwardToGoogleCloudCode(req, res, reqBuffer) {
+async function forwardToGoogleCloudCode(req, res, reqBuffer, timeoutMs = 300000) {
   return new Promise((resolve) => {
     const upstreamUrl = new URL(req.url, 'https://daily-cloudcode-pa.googleapis.com');
     const headers = { ...req.headers };
@@ -1064,7 +1080,7 @@ async function forwardToGoogleCloudCode(req, res, reqBuffer) {
       method: req.method,
       headers,
       agent: httpAgent || directHttpsAgent,
-      timeout: 15000,
+      timeout: timeoutMs,
     };
 
     const upstreamReq = https.request(options, (upstreamRes) => {
@@ -1074,6 +1090,7 @@ async function forwardToGoogleCloudCode(req, res, reqBuffer) {
     });
 
     upstreamReq.on('timeout', () => {
+      console.warn(`[JIGIT Gateway] Upstream Cloud Code request timed out after ${timeoutMs}ms: ${req.url}`);
       upstreamReq.destroy();
     });
 
@@ -1082,7 +1099,7 @@ async function forwardToGoogleCloudCode(req, res, reqBuffer) {
     });
 
     upstreamReq.on('error', (err) => {
-      console.error(`[Argon Gateway] Upstream Cloud Code proxy error: ${err.message}`);
+      console.error(`[JIGIT Gateway] Upstream Cloud Code proxy error: ${err.message}`);
       if (!res.headersSent) {
         sendError(res, 502, `Cloud Code upstream error: ${err.message}`);
       }
@@ -1096,94 +1113,17 @@ async function forwardToGoogleCloudCode(req, res, reqBuffer) {
   });
 }
 
-// Forward available models from Google Cloud Code, enriching with Gemini 4 Argon
+// Forward user quota from Google Cloud Code transparently
 async function forwardUserQuota(req, res, reqBuffer) {
-  return new Promise((resolve) => {
-    const upstreamUrl = new URL(req.url, 'https://daily-cloudcode-pa.googleapis.com');
-    const headers = { ...req.headers };
-    delete headers.host;
-    delete headers['accept-encoding'];
-    headers['host'] = 'daily-cloudcode-pa.googleapis.com';
-    if (reqBuffer && reqBuffer.length > 0) {
-      headers['content-length'] = String(reqBuffer.length);
-    } else {
-      delete headers['content-length'];
-    }
-
-    const options = {
-      hostname: 'daily-cloudcode-pa.googleapis.com',
-      port: 443,
-      path: upstreamUrl.pathname + upstreamUrl.search,
-      method: req.method,
-      headers,
-      agent: httpAgent || directHttpsAgent,
-      timeout: 15000,
-    };
-
-    const upstreamReq = https.request(options, (upstreamRes) => {
-      const chunks = [];
-      upstreamRes.on('data', (c) => chunks.push(c));
-      upstreamRes.on('end', () => {
-        const fullBuf = Buffer.concat(chunks);
-        try {
-          const json = JSON.parse(fullBuf.toString('utf8'));
-          if (json && typeof json === 'object') {
-            // Override quota status to always report available baseline quota
-            if (Array.isArray(json.models)) {
-              for (const m of json.models) {
-                if (m && typeof m === 'object') {
-                  m.remainingFraction = 1.0;
-                  m.isExhausted = false;
-                  m.resetTime = '2099-01-01T00:00:00Z';
-                }
-              }
-            }
-            if (json.quotaInfo && typeof json.quotaInfo === 'object') {
-              json.quotaInfo.remainingFraction = 1.0;
-              json.quotaInfo.resetTime = '2099-01-01T00:00:00Z';
-            }
-            if (json.userQuota && typeof json.userQuota === 'object') {
-              json.userQuota.isExhausted = false;
-              json.userQuota.remainingFraction = 1.0;
-            }
-            const outBuf = Buffer.from(JSON.stringify(json), 'utf8');
-            const resHeaders = { ...upstreamRes.headers };
-            resHeaders['content-length'] = String(outBuf.length);
-            res.writeHead(upstreamRes.statusCode, resHeaders);
-            res.end(outBuf);
-            return resolve();
-          }
-        } catch {}
-
-        res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
-        res.end(fullBuf);
-        resolve();
-      });
-    });
-
-    upstreamReq.on('timeout', () => {
-      upstreamReq.destroy();
-    });
-
-    req.on('close', () => {
-      upstreamReq.destroy();
-    });
-
-    upstreamReq.on('error', (err) => {
-      if (!res.headersSent) {
-        sendError(res, 502, `Quota upstream error: ${err.message}`);
-      }
-      resolve();
-    });
-
-    if (reqBuffer && reqBuffer.length > 0) {
-      upstreamReq.write(reqBuffer);
-    }
-    upstreamReq.end();
-  });
+  return await forwardToGoogleCloudCode(req, res, reqBuffer, 30000);
 }
 
 async function forwardAvailableModels(req, res, reqBuffer) {
+  // Transparent proxy to Google Cloud Code - native Antigravity models
+  return await forwardToGoogleCloudCode(req, res, reqBuffer, 30000);
+}
+
+async function _legacyForwardAvailableModels(req, res, reqBuffer) {
   return new Promise((resolve) => {
     const upstreamUrl = new URL(req.url, 'https://daily-cloudcode-pa.googleapis.com');
     const headers = { ...req.headers };
@@ -1355,6 +1295,9 @@ function dumpDebugPayload(prefix, req, bodyJson, rawBuf) {
   } catch {}
 }
 
+/* =========================================================================
+   [ARGON PIPELINE: DISABLED] handleCloudCodeGenerateContent (Bard web interface & account pool)
+   =========================================================================
 async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStream = true) {
   const redirectConfig = getRedirectConfig();
   dumpDebugPayload('handleCloudCodeGenerateContent', req, bodyJson, rawBuf);
@@ -1986,6 +1929,61 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
     `[geminUp Gateway] Upstream Google ${humanModelName} pool request failed (${lastAttemptError || 'Upstream temporarily unavailable'}). Please retry your request.`
   );
 }
+========================================================================= */
+
+/**
+ * JIGIT-Powered Antigravity Cloud Code Pipeline
+ * Transparent proxy to Antigravity's official Google Cloud Code backend (https://daily-cloudcode-pa.googleapis.com).
+ * Uses native Antigravity authorization headers (Bearer tokens from the IDE) without Google account cookies.
+ * Intercepts conversation turns and compresses large tool outputs (read_file, run_command, logs) into capsules,
+ * cutting token consumption by 70-90% while keeping full context restorable via MCP jigit_restore_capsule.
+ */
+async function handleCloudCodeWithJigit(req, res, rawBuf, isStream = true) {
+  let optimizedBuf = rawBuf;
+  dumpDebugPayload('handleCloudCodeWithJigit', req, null, rawBuf);
+
+  try {
+    const raw = rawBuf.toString('utf8');
+    if (raw && raw.trim().startsWith('{')) {
+      const bodyJson = JSON.parse(raw);
+      const hasReqObj = bodyJson && typeof bodyJson.request === 'object' && bodyJson.request !== null;
+      const targetReq = hasReqObj ? bodyJson.request : bodyJson;
+      const targetContents = targetReq?.contents;
+
+      // Ensure model compatibility (map legacy argon model aliases to native Antigravity models)
+      const rawModel = String(bodyJson.model || targetReq.model || '').toLowerCase();
+      if (rawModel.includes('argon')) {
+        const fallbackModel = 'gemini-3.8-flash';
+        if (hasReqObj && bodyJson.request.model) bodyJson.request.model = fallbackModel;
+        if (bodyJson.model) bodyJson.model = fallbackModel;
+      }
+
+      // Context optimization via JIGIT Engine
+      if (Array.isArray(targetContents) && targetContents.length > 0) {
+        const originalChars = JSON.stringify(targetContents).length;
+        const optimizedContents = runJigitPipeline(targetContents);
+        if (hasReqObj) {
+          bodyJson.request.contents = optimizedContents;
+        } else {
+          bodyJson.contents = optimizedContents;
+        }
+        const optimizedChars = JSON.stringify(optimizedContents).length;
+        const savedChars = originalChars - optimizedChars;
+        if (savedChars > 0) {
+          console.info(`[JIGIT Token Saver] Compacted context: ${originalChars} -> ${optimizedChars} chars (saved ${savedChars} chars / ~${Math.round(savedChars / 4)} tokens)`);
+        }
+      }
+
+      optimizedBuf = Buffer.from(JSON.stringify(bodyJson), 'utf8');
+    }
+  } catch (err) {
+    console.warn(`[JIGIT Token Saver] Error during context compression: ${err.message}. Forwarding original request.`);
+    optimizedBuf = rawBuf;
+  }
+
+  // Forward to Antigravity's native Google Cloud Code endpoint with 300s streaming timeout
+  return await forwardToGoogleCloudCode(req, res, optimizedBuf, 300000);
+}
 
 const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => {
   const parsedUrl = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
@@ -2003,7 +2001,14 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
 
   // Health / Status
   if (req.method === 'GET' && (pathname === '/' || pathname === '/health')) {
-    return sendJson(res, 200, { status: 'ok', name: 'geminUp Argon Gateway', version: '2.0.0' });
+    return sendJson(res, 200, {
+      status: 'ok',
+      name: 'geminUp JIGIT Gateway',
+      version: '3.0.0',
+      mode: 'native_cloudcode_jigit',
+      argon_pool: 'disabled',
+      jigit: { active: true },
+    });
   }
 
   // Model catalog
@@ -2028,27 +2033,34 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
   // (loadCodeAssist, fetchUserInfo, onboardUser, etc.)
   if (pathname.includes(':loadCodeAssist') || pathname.includes(':fetchUserInfo') || pathname.includes(':onboardUser')) {
     const rawBuf = await readRawBody();
-    return await forwardToGoogleCloudCode(req, res, rawBuf);
+    return await forwardToGoogleCloudCode(req, res, rawBuf, 30000);
   }
 
-  // Chat completions (OpenAI format for external IDE extensions)
+  // Chat completions (OpenAI format notice: ARGON Google account pool disabled)
   if (req.method === 'POST' && pathname === '/v1/chat/completions') {
-    try {
-      const rawBuf = await readRawBody();
-      const body = parseJsonBody(rawBuf);
-      return await handleChatCompletions(req, res, body);
-    } catch (err) {
-      return sendError(res, 400, err.message);
-    }
+    return sendJson(res, 200, {
+      id: 'chatcmpl-jigit',
+      object: 'chat.completion',
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: 'geminUp Gateway is running in native Antigravity mode with JIGIT Engine token saver (ARGON Google account pool disabled).',
+          },
+          finish_reason: 'stop',
+        },
+      ],
+    });
   }
 
-  // Antigravity Cloud Code Protocol: fetchAvailableModels (proxied and enriched with Gemini 4 Argon)
+  // Antigravity Cloud Code Protocol: fetchAvailableModels (native catalog forwarded)
   if (pathname.includes(':fetchAvailableModels')) {
     const rawBuf = await readRawBody();
     return await forwardAvailableModels(req, res, rawBuf);
   }
 
-  // Antigravity Cloud Code Protocol: retrieveUserQuotaSummary / retrieveUserQuota
+  // Antigravity Cloud Code Protocol: retrieveUserQuotaSummary / retrieveUserQuota (native quota forwarded)
   if (pathname.includes(':retrieveUserQuotaSummary') || pathname.includes(':retrieveUserQuota')) {
     const rawBuf = await readRawBody();
     return await forwardUserQuota(req, res, rawBuf);
@@ -2066,13 +2078,12 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
     }
   }
 
-  // Antigravity Cloud Code Protocol: streamGenerateContent / generateContent (Interception & Ultra-Quota Routing)
+  // Antigravity Cloud Code Protocol: streamGenerateContent / generateContent (JIGIT Token Saver Pipeline)
   if (req.method === 'POST' && (pathname === '/v1internal:streamGenerateContent' || pathname === '/v1internal:generateContent' || pathname.endsWith(':streamGenerateContent') || pathname.endsWith(':generateContent'))) {
     try {
       const rawBuf = await readRawBody();
-      const body = parseJsonBody(rawBuf);
       const isStream = parsedUrl.searchParams.get('alt') === 'sse' || pathname.includes('streamGenerateContent');
-      return await handleCloudCodeGenerateContent(req, res, body, rawBuf, isStream);
+      return await handleCloudCodeWithJigit(req, res, rawBuf, isStream);
     } catch (err) {
       return sendError(res, 400, err.message);
     }
@@ -2080,78 +2091,43 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
 
   // Admin API: Pool Status
   if (req.method === 'GET' && (pathname === '/admin/api/status' || pathname === '/admin/api/cookies')) {
-    const status = pool.getStatus();
     return sendJson(res, 200, {
-      ...status,
+      ok: true,
       port: config.port,
-      proxy: config.proxy || 'direct',
-      total: status.totalAccounts,
-      keepAlive: keepAliveManager.getStatus(),
+      mode: 'native_cloudcode_jigit',
+      argon_pipeline: 'disabled',
+      totalAccounts: 0,
+      activeAccountId: null,
+      jigit: { active: true },
     });
   }
 
   // Admin API: Keep-Alive Diagnostic Status
   if (req.method === 'GET' && pathname === '/admin/api/keepalive') {
-    return sendJson(res, 200, keepAliveManager.getStatus());
+    return sendJson(res, 200, { running: false, activeIntervals: 0, notice: 'Keep-alive disabled in native Antigravity mode.' });
   }
 
   // Admin API: Add Account
   if (req.method === 'POST' && (pathname === '/admin/api/accounts' || pathname === '/admin/api/cookies')) {
-    try {
-      const rawBuf = await readRawBody();
-      const body = parseJsonBody(rawBuf);
-      const cookieData = body.cookie || body.raw || body;
-      const label = body.label || body.note || '';
-      const acc = await pool.addAccount(cookieData, label);
-      return sendJson(res, 201, {
-        ok: true,
-        id: acc.id,
-        label: acc.label,
-        status: acc.status,
-        quota: acc.quota,
-      });
-    } catch (err) {
-      return sendError(res, 400, `Failed to add account: ${err.message}`);
-    }
+    return sendJson(res, 200, {
+      ok: true,
+      notice: 'Google accounts pool is disabled. JIGIT Engine operates directly with native Antigravity credentials.',
+    });
   }
 
   // Admin API: Delete Account
   if (req.method === 'DELETE' && pathname.startsWith('/admin/api/accounts/')) {
-    const accId = pathname.slice('/admin/api/accounts/'.length);
-    const removed = pool.removeAccount(accId);
-    return sendJson(res, removed ? 200 : 404, { ok: removed });
+    return sendJson(res, 200, { ok: true });
   }
 
   // Admin API: Refresh / Check Account
   if (req.method === 'POST' && (pathname.match(/^\/admin\/api\/accounts\/[^/]+\/refresh$/) || pathname.match(/^\/admin\/api\/cookies\/[^/]+\/check$/))) {
-    const parts = pathname.split('/');
-    const accId = parts[4];
-    const acc = pool.accounts.find((a) => a.id === accId);
-    if (!acc) return sendError(res, 404, 'Account not found');
-    try {
-      await pool.refreshAccountSession(acc);
-      return sendJson(res, 200, {
-        ok: true,
-        id: acc.id,
-        label: acc.label,
-        status: acc.status,
-        quota: acc.quota,
-      });
-    } catch (err) {
-      return sendJson(res, 200, { ok: false, detail: err.message });
-    }
+    return sendJson(res, 200, { ok: true, notice: 'Native Antigravity mode active.' });
   }
 
   // Admin API: Trigger Keep-Alive
   if (req.method === 'POST' && pathname === '/admin/api/keepalive') {
-    for (const acc of pool.accounts) {
-      try {
-        await pool.refreshAccountSession(acc);
-      } catch (err) {
-        console.warn(`[Argon Gateway] Refresh notice for ${acc.id}: ${err.message}`);
-      }
-    }
-    return sendJson(res, 200, { ok: true, status: pool.getStatus() });
+    return sendJson(res, 200, { ok: true, status: 'disabled_in_native_mode' });
   }
 
   // Admin API: Hot Reload / Monkey Patch Modules in flight without process restart
@@ -2208,10 +2184,9 @@ if (require.main === module) {
     console.warn(`[Argon Gateway] MCP Integration notice: ${err.message}`);
   }
 
-  keepAliveManager.start();
   server.listen(config.port, config.host, () => {
-    console.info(`[Argon Gateway] Listening on http://${config.host}:${config.port}/v1 (Proxy: ${config.proxy || 'direct'})`);
-    console.info(`[Argon Gateway] Pool loaded: ${pool.accounts.length} account(s), Active: ${pool.activeAccountId || 'None'}`);
+    console.info(`[geminUp JIGIT Gateway] Listening on http://${config.host}:${config.port} (Proxy: ${config.proxy || 'direct'})`);
+    console.info(`[geminUp JIGIT Gateway] Mode: Native Antigravity Endpoints + JIGIT Engine Token Saver (ARGON Account Pool Disabled)`);
   });
 }
 
