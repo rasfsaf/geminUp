@@ -394,6 +394,48 @@ Instruction: The user has attached an image or screenshot saved at '${posixPath}
 
 let jigitEngine = require('./jigit-engine');
 
+function hotReloadJigitModules() {
+  const modulesToReload = [
+    './jigit-engine',
+    './capsule-store',
+    './jigit-logger',
+    './wire-format',
+    './stream-parser',
+    './quota',
+    './mcp-registration',
+  ];
+  const reloaded = [];
+  for (const modName of modulesToReload) {
+    try {
+      const resolved = require.resolve(modName);
+      delete require.cache[resolved];
+      const loaded = require(resolved);
+      if (modName === './jigit-engine') {
+        jigitEngine = loaded;
+      }
+      reloaded.push(modName);
+    } catch (e) {
+      console.warn(`[JIGIT Hot Reload] Error reloading ${modName}: ${e.message}`);
+    }
+  }
+  return reloaded;
+}
+
+// Automatic monkeypatching watcher: hot-reloads modules on disk change without process restart
+try {
+  const enginePath = path.join(__dirname, 'jigit-engine.js');
+  let reloadTimer = null;
+  fs.watch(enginePath, () => {
+    clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(() => {
+      const list = hotReloadJigitModules();
+      console.log(`[JIGIT Gateway] 🔥 In-flight hot monkeypatch applied: ${list.join(', ')}`);
+    }, 200);
+  });
+} catch (err) {
+  // Ignore watcher setup error
+}
+
 function optimizeConversationTurns(turnsList, maxTurnToolResultChars = 1200, keepFullRecentTurns = 10, maxTotalPromptTurns = 16) {
   const runner = jigitEngine.runJigitPipeline || runJigitPipeline;
   return runner(turnsList, {
@@ -2041,7 +2083,8 @@ async function handleCloudCodeWithJigit(req, res, rawBuf, isStream = true) {
 
       // Context optimization via Jewish Tokenizer / JIGIT Engine
       if (Array.isArray(targetContents) && targetContents.length > 0) {
-        const optimizedContents = runJigitPipeline(targetContents, { conversationId });
+        const runner = (jigitEngine && jigitEngine.runJigitPipeline) ? jigitEngine.runJigitPipeline : runJigitPipeline;
+        const optimizedContents = runner(targetContents, { conversationId });
         if (hasReqObj) {
           bodyJson.request.contents = optimizedContents;
         } else {
@@ -2106,11 +2149,17 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
     return raw ? JSON.parse(raw) : {};
   };
 
-  // Antigravity Cloud Code Protocol: forward non-inference handshake calls to Google Cloud
-  // (loadCodeAssist, fetchUserInfo, onboardUser, etc.)
-  if (pathname.includes(':loadCodeAssist') || pathname.includes(':fetchUserInfo') || pathname.includes(':onboardUser')) {
+  // Antigravity Cloud Code Protocol: forward all non-inference handshake calls immediately
+  // (loadCodeAssist, fetchUserInfo, fetchAvailableModels, onboardUser, checkUserQuota, etc.)
+  // Jewish Tokenizer stays completely in the shadows for account/auth/handshake operations.
+  const isInference = pathname.endsWith(':streamGenerateContent') || 
+                      pathname.endsWith(':generateContent') || 
+                      pathname === '/v1internal:streamGenerateContent' || 
+                      pathname === '/v1internal:generateContent';
+
+  if (!isInference && (pathname.startsWith('/v1internal:') || pathname.startsWith('/v1internal/'))) {
     const rawBuf = await readRawBody();
-    return await forwardToGoogleCloudCode(req, res, rawBuf, 30000);
+    return await forwardToGoogleCloudCode(req, res, rawBuf, 20000);
   }
 
   // Chat completions (OpenAI format notice: ARGON Google account pool disabled)
@@ -2210,28 +2259,7 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
   // Admin API: Hot Reload / Monkey Patch Modules in flight without process restart
   if (req.method === 'POST' && pathname === '/admin/api/reload') {
     try {
-      const reloaded = [];
-      const modulesToReload = [
-        './jigit-engine',
-        './capsule-store',
-        './stream-parser',
-        './wire-format',
-        './quota',
-        './mcp-registration',
-      ];
-      for (const modName of modulesToReload) {
-        try {
-          const resolved = require.resolve(modName);
-          delete require.cache[resolved];
-          const loaded = require(resolved);
-          if (modName === './jigit-engine') {
-            jigitEngine = loaded;
-          }
-          reloaded.push(modName);
-        } catch (e) {
-          console.warn(`[Argon Hot Reload] Error reloading ${modName}: ${e.message}`);
-        }
-      }
+      const reloaded = hotReloadJigitModules();
       return sendJson(res, 200, {
         ok: true,
         reloaded,

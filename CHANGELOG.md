@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [2.0.1] - 2026-10-22
+
+### RU (Русский)
+
+#### Устранение дегенеративных циклов в рассуждениях и горячий патчинг
+- **Автоматический разрыв циклов в рассуждениях (Thought Loop Breaker):** Движок JIGIT Engine теперь детектирует и пресекает авторегрессионные петли повторения в рассуждениях модели. Избыточные циклы схлопываются, сохраняя чистый контекст и предотвращая зависание интерфейса среды разработки на статусе ожидания.
+- **Полное исключение черновиков мыслей из истории (`thought: true`):** Промежуточные блоки рассуждений (`thought: true` и теги `<thought>`) из завершённых ходов полностью удаляются из исходящего пакета на Google Cloud Code и сохраняются в локальное капсульное хранилище. Это устраняет эхо старых мыслей и снижает расход контекстных токенов.
+- **Горячая перезагрузка модулей на лету (Zero-Downtime Hot-Reload):** Шлюз получил поддержку динамического применения патчей без перезапуска процесса через отслеживание изменений файлов и эндпоинт `POST /admin/api/reload`. Порт 8083 остаётся непрерывно активным, исключая сетевые разрывы и ошибки соединения.
+- **Прозрачный транзит служебных запросов аутентификации:** Все запросы проверки аккаунта, моделей и инициализации IDE (`loadCodeAssist`, `fetchAvailableModels`, `fetchUserInfo`) перенаправляются в Google Cloud Code напрямую с минимальной задержкой, оставляя токенизатор строго в рамках сессий генерации.
+
+### EN (English)
+
+#### Thought Loop Breaker and Zero-Downtime Hot-Reloading
+- **Degenerative Thought Loop Breaker:** JIGIT Engine now actively detects autoregressive loop patterns in model reasoning, collapsing redundant iterations into compact references to prevent IDE interface stalls and token exhaustion.
+- **Full Historical Scratchpad Stripping (`thought: true`):** Internal thinking scratchpads (`thought: true` and `<thought>` blocks) from completed turns are completely stripped from outgoing Google Cloud Code requests and offloaded to local JIGIT capsules, eliminating echo loops and reclaiming significant context window space.
+- **Zero-Downtime Hot-Reloading:** The gateway now supports in-memory module hot-reloading via file system monitoring and the `POST /admin/api/reload` endpoint. Port 8083 remains open continuously without process termination, preventing socket drops and `connectex: connection refused` errors.
+- **Transparent Handshake & Authentication Routing:** All non-inference account, model catalog, and onboarding calls (`loadCodeAssist`, `fetchAvailableModels`, `fetchUserInfo`) are routed directly to Google Cloud Code with minimal latency, keeping the tokenizer focused strictly on chat and code generation.
+
+---
+
 ## [2.0.0] - 2026-10-22
 
 ### RU (Русский)
