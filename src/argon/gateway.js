@@ -667,10 +667,10 @@ async function handleChatCompletions(req, res, bodyJson) {
       const capacityField = account.modelCapacityField || 12;
       const modelHeader = buildModelHeader(upstreamId, capacity, capacityField);
 
-      const targetAction = account.quota?.items?.[0]?.action || (account.modelCapacityField === 13 ? 12 : 2);
+      // Antigravity Agent Mode ultra-quota activation (action: 12)
       const genReq = buildGenerateRequest(prompt, modelHeader, account.session, 100000 + attempts, {
         agentMode: true,
-        action: targetAction,
+        action: 12,
         temporary: true,
       });
 
@@ -1176,10 +1176,10 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
       const capacityField = account.modelCapacityField || 12;
       const modelHeader = buildModelHeader(upstreamId, capacity, capacityField);
 
-      const targetAction = account.quota?.items?.[0]?.action || (account.modelCapacityField === 13 ? 12 : 2);
+      // Antigravity Agent Mode ultra-quota activation (action: 12)
       const genReq = buildGenerateRequest(prompt, modelHeader, account.session, 200000 + attempts, {
         agentMode: true,
-        action: targetAction,
+        action: 12,
         temporary: true,
       });
 
