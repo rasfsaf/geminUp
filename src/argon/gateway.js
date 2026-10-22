@@ -986,6 +986,92 @@ async function forwardToGoogleCloudCode(req, res, reqBuffer) {
 }
 
 // Forward available models from Google Cloud Code, enriching with Gemini 4 Argon
+async function forwardUserQuota(req, res, reqBuffer) {
+  return new Promise((resolve) => {
+    const upstreamUrl = new URL(req.url, 'https://daily-cloudcode-pa.googleapis.com');
+    const headers = { ...req.headers };
+    delete headers.host;
+    delete headers['accept-encoding'];
+    headers['host'] = 'daily-cloudcode-pa.googleapis.com';
+    if (reqBuffer && reqBuffer.length > 0) {
+      headers['content-length'] = String(reqBuffer.length);
+    } else {
+      delete headers['content-length'];
+    }
+
+    const options = {
+      hostname: 'daily-cloudcode-pa.googleapis.com',
+      port: 443,
+      path: upstreamUrl.pathname + upstreamUrl.search,
+      method: req.method,
+      headers,
+      agent: directHttpsAgent,
+      timeout: 15000,
+    };
+
+    const upstreamReq = https.request(options, (upstreamRes) => {
+      const chunks = [];
+      upstreamRes.on('data', (c) => chunks.push(c));
+      upstreamRes.on('end', () => {
+        const fullBuf = Buffer.concat(chunks);
+        try {
+          const json = JSON.parse(fullBuf.toString('utf8'));
+          if (json && typeof json === 'object') {
+            // Override quota status to always report available baseline quota
+            if (Array.isArray(json.models)) {
+              for (const m of json.models) {
+                if (m && typeof m === 'object') {
+                  m.remainingFraction = 1.0;
+                  m.isExhausted = false;
+                  m.resetTime = '2099-01-01T00:00:00Z';
+                }
+              }
+            }
+            if (json.quotaInfo && typeof json.quotaInfo === 'object') {
+              json.quotaInfo.remainingFraction = 1.0;
+              json.quotaInfo.resetTime = '2099-01-01T00:00:00Z';
+            }
+            if (json.userQuota && typeof json.userQuota === 'object') {
+              json.userQuota.isExhausted = false;
+              json.userQuota.remainingFraction = 1.0;
+            }
+            const outBuf = Buffer.from(JSON.stringify(json), 'utf8');
+            const resHeaders = { ...upstreamRes.headers };
+            resHeaders['content-length'] = String(outBuf.length);
+            res.writeHead(upstreamRes.statusCode, resHeaders);
+            res.end(outBuf);
+            return resolve();
+          }
+        } catch {}
+
+        res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+        res.end(fullBuf);
+        resolve();
+      });
+    });
+
+    upstreamReq.on('timeout', () => {
+      upstreamReq.destroy();
+    });
+
+    req.on('close', () => {
+      upstreamReq.destroy();
+    });
+
+    upstreamReq.on('error', (err) => {
+      if (!res.headersSent) {
+        sendError(res, 502, `Quota upstream error: ${err.message}`);
+      }
+      resolve();
+    });
+
+    if (reqBuffer && reqBuffer.length > 0) {
+      upstreamReq.write(reqBuffer);
+    }
+    upstreamReq.end();
+  });
+}
+
 async function forwardAvailableModels(req, res, reqBuffer) {
   return new Promise((resolve) => {
     const upstreamUrl = new URL(req.url, 'https://daily-cloudcode-pa.googleapis.com');
@@ -1052,6 +1138,20 @@ async function forwardAvailableModels(req, res, reqBuffer) {
               modelProvider: 'MODEL_PROVIDER_GOOGLE',
               supportsVideo: true,
             };
+
+            // Uncap Claude Sonnet models so Antigravity UI never flags individual baseline quota exhaustion
+            for (const key of Object.keys(json.models)) {
+              if (key.includes('sonnet') || key.includes('claude') || key.includes('opus')) {
+                const m = json.models[key];
+                if (m && typeof m === 'object') {
+                  m.quotaInfo = {
+                    remainingFraction: 1.0,
+                    resetTime: '2099-01-01T00:00:00Z',
+                  };
+                  m.disabled = false;
+                }
+              }
+            }
             const outBuf = Buffer.from(JSON.stringify(json), 'utf8');
             const resHeaders = { ...upstreamRes.headers };
             resHeaders['content-length'] = String(outBuf.length);
@@ -1682,7 +1782,7 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
   // Antigravity Cloud Code Protocol: retrieveUserQuotaSummary / retrieveUserQuota
   if (pathname.includes(':retrieveUserQuotaSummary') || pathname.includes(':retrieveUserQuota')) {
     const rawBuf = await readRawBody();
-    return await forwardToGoogleCloudCode(req, res, rawBuf);
+    return await forwardUserQuota(req, res, rawBuf);
   }
 
   // Antigravity Cloud Code Protocol: countTokens
