@@ -501,25 +501,28 @@ function extractPromptFromAnyPayload(bodyJson) {
 
   const parts = [];
 
-  // Extract Tools from payload and prepend tool calling capabilities
+  // 1. ALWAYS inject the fundamental Antigravity IDE Identity & Environment persona
+  parts.push(ANTIGRAVITY_IDE_SYSTEM_PROMPT);
+
+  // 2. Extract Tools from payload and prepend tool calling capabilities
   const tools = extractToolsFromPayload(bodyJson);
   if (tools.length > 0) {
     parts.push(buildToolInstructionPrompt(tools));
   }
 
-  // Extract System Instruction
+  // 3. Extract external System Instruction passed by Antigravity / Cloud Code
   if (typeof sysInst === 'string' && sysInst.trim()) {
-    parts.push(`# Instructions\n${sysInst.trim()}`);
+    parts.push(`# Additional Workspace Instructions\n${sysInst.trim()}`);
   } else if (sysInst && typeof sysInst === 'object') {
     if (typeof sysInst.text === 'string' && sysInst.text.trim()) {
-      parts.push(`# Instructions\n${sysInst.text.trim()}`);
+      parts.push(`# Additional Workspace Instructions\n${sysInst.text.trim()}`);
     } else if (Array.isArray(sysInst.parts)) {
       const texts = sysInst.parts.map((p) => (typeof p === 'string' ? p : p?.text || p?.content || '')).filter(Boolean);
-      if (texts.length) parts.push(`# Instructions\n${texts.join('\n')}`);
+      if (texts.length) parts.push(`# Additional Workspace Instructions\n${texts.join('\n')}`);
     }
   }
 
-  // Extract Contents / Turns with sliding window context optimization
+  // 4. Extract Contents / Turns with sliding window context optimization
   const rawTurnsList = Array.isArray(contents) ? contents : (contents && typeof contents === 'object' ? [contents] : (Array.isArray(turns) ? turns : null));
   const turnsList = optimizeConversationTurns(rawTurnsList, 1200, 4, 8);
   if (turnsList) {
