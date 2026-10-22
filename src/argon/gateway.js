@@ -1392,7 +1392,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
           upstreamRes.body.on('end', () => {
             streamFinishedCleanly = true;
-            resolve({ ok: true });
+            resolve({ ok: !streamError, error: streamError });
           });
 
           upstreamRes.body.on('error', (err) => {
@@ -1405,16 +1405,19 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
           return;
         }
 
-        // If upstream aborted or failed prematurely and we haven't emitted any content yet, attempt reconnect
-        if (!streamResult.ok) {
-          const errMsg = streamResult.error?.message || '';
-          if (streamedContentLength === 0 && accumulatedContent.length === 0 && attempts < maxAttempts) {
-            console.warn(`[Argon Gateway] Upstream stream disconnected before data (${errMsg}). Reconnecting seamlessly (Attempt ${attempts}/${maxAttempts})...`);
+        // If upstream errored, overloaded or disconnected before data was emitted, failover to next account & reconnect
+        if (!streamResult.ok || streamError) {
+          const err = streamResult.error || streamError;
+          const errMsg = err?.message || 'Upstream stream error';
+          if (streamedContentLength === 0 && attempts < maxAttempts) {
+            console.warn(`[Argon Gateway] Upstream error on "${account.label}" (${errMsg}). Failing over & reconnecting (Attempt ${attempts}/${maxAttempts})...`);
+            if (err?.upstreamStatus === 429) {
+              pool.markExhausted(account.id);
+            }
             account = pool.getActiveAccount() || account;
             continue;
           }
         }
-
         // If we reached here, finish the response
         let { toolCalls, cleanText } = extractToolCallsFromOutput(accumulatedContent);
         if (toolCalls.length === 0 && accumulatedThoughts) {
