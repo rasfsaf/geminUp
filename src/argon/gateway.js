@@ -328,15 +328,19 @@ Instruction: The user has attached an image or screenshot saved at '${posixPath}
   }
 }
 
-function optimizeConversationTurns(turnsList, maxTurnToolResultChars = 1200, keepFullRecentTurns = 4, maxTotalPromptTurns = 8) {
-  return runJigitPipeline(turnsList, {
+let jigitEngine = require('./jigit-engine');
+
+function optimizeConversationTurns(turnsList, maxTurnToolResultChars = 1200, keepFullRecentTurns = 10, maxTotalPromptTurns = 16) {
+  const runner = jigitEngine.runJigitPipeline || runJigitPipeline;
+  return runner(turnsList, {
     keepRecentTurns: keepFullRecentTurns,
     maxPromptTurns: maxTotalPromptTurns,
   });
 }
 
 function enforcePromptBudget(promptText, maxChars = 38000) {
-  return enforceJigitBudget(promptText, maxChars);
+  const enforcer = jigitEngine.enforceJigitBudget || enforceJigitBudget;
+  return enforcer(promptText, maxChars);
 }
 
 function payloadHasImages(bodyJson) {
@@ -1924,6 +1928,42 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
       }
     }
     return sendJson(res, 200, { ok: true, status: pool.getStatus() });
+  }
+
+  // Admin API: Hot Reload / Monkey Patch Modules in flight without process restart
+  if (req.method === 'POST' && pathname === '/admin/api/reload') {
+    try {
+      const reloaded = [];
+      const modulesToReload = [
+        './jigit-engine',
+        './capsule-store',
+        './stream-parser',
+        './wire-format',
+        './quota',
+        './mcp-registration',
+      ];
+      for (const modName of modulesToReload) {
+        try {
+          const resolved = require.resolve(modName);
+          delete require.cache[resolved];
+          const loaded = require(resolved);
+          if (modName === './jigit-engine') {
+            jigitEngine = loaded;
+          }
+          reloaded.push(modName);
+        } catch (e) {
+          console.warn(`[Argon Hot Reload] Error reloading ${modName}: ${e.message}`);
+        }
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        reloaded,
+        timestamp: new Date().toISOString(),
+        message: 'Hot monkey-patch applied successfully in flight.',
+      });
+    } catch (err) {
+      return sendJson(res, 500, { ok: false, error: err.message });
+    }
   }
 
   // Default fallback for any other Cloud Code endpoints: forward transparently
