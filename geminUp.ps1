@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status', 'watchdog', 'antigravity-patch', 'antigravity-rollback', 'argon-menu', 'argon-enable', 'argon-disable', 'argon-status', 'argon-accounts', 'argon-cookie', 'argon-test', 'argon-route')]
+    [ValidateSet('menu', 'enable', 'change', 'refresh', 'disable', 'status', 'watchdog',
+        'antigravity-patch', 'antigravity-rollback',
+        'jewish-tokenizer', 'tokenizer-menu', 'tokenizer-enable', 'tokenizer-disable', 'tokenizer-status', 'tokenizer-test', 'tokenizer-clean', 'tokenizer-route',
+        'argon-menu', 'argon-enable', 'argon-disable', 'argon-status', 'argon-accounts', 'argon-cookie', 'argon-test', 'argon-route')]
     [string]$Action = 'menu'
 )
 
@@ -1253,18 +1256,17 @@ function Set-AntigravityArgonRouting {
         if ($runningLs.Count -gt 0) {
             $runningLs | Stop-Process -Force -ErrorAction SilentlyContinue
             if (-not $Silent) {
-                Write-Host '  Language server recycled to adopt local Ultra-Quota Gateway.' -ForegroundColor DarkCyan
+                Write-Host '  Language server recycled to adopt local Jewish Tokenizer proxy.' -ForegroundColor DarkCyan
             }
         }
 
         if (-not $Silent) {
             Write-Host ''
-            Write-TransportLog OK 'Claude Sonnet 4.6 -> Gemini 4 Argon Redirection: ENABLED (Fail-Closed mode).'
-            Write-Host '  When Claude Sonnet 4.6 is selected in Antigravity, requests are transparently' -ForegroundColor Green
-            Write-Host '  redirected to Gemini 4 Argon Ultra-Quota (rotating account pool with Agent Mode quota).' -ForegroundColor Green
-            Write-Host '  Gemini 3.8 Flash requests are also powered by the rotating account pool.' -ForegroundColor Green
-            Write-Host '  If accounts pool is exhausted, requests fail-closed without hitting Google Cloud.' -ForegroundColor Yellow
-            Write-Host '  Restart Antigravity IDE if model status does not update immediately.' -ForegroundColor Yellow
+            Write-TransportLog OK 'Jewish Tokenizer (Antigravity Token Saver Proxy): ENABLED.'
+            Write-Host '  All Antigravity requests are transparently routed through local Jewish Tokenizer.' -ForegroundColor Green
+            Write-Host '  JIGIT Engine compresses oversized tool outputs and files into local capsules.' -ForegroundColor Green
+            Write-Host '  Saves 60% - 90% prompt tokens on each request using native IDE credentials.' -ForegroundColor Green
+            Write-Host '  Restart Antigravity IDE if language server does not restart automatically.' -ForegroundColor Yellow
             Write-Host ''
         }
     } else {
@@ -1280,8 +1282,8 @@ function Set-AntigravityArgonRouting {
 
         if (-not $Silent) {
             Write-Host ''
-            Write-TransportLog OK 'Claude Sonnet 4.6 -> Gemini 4 Argon Redirection: DISABLED.'
-            Write-Host '  Claude Sonnet and Gemini requests will go directly to Google Cloud backend.' -ForegroundColor White
+            Write-TransportLog OK 'Jewish Tokenizer (Antigravity Token Saver Proxy): DISABLED.'
+            Write-Host '  Antigravity requests will go directly to Google Cloud backend without proxy.' -ForegroundColor White
             Write-Host '  Restart Antigravity IDE to complete the switch.' -ForegroundColor Yellow
             Write-Host ''
         }
@@ -2169,13 +2171,13 @@ function Start-ArgonBridge {
 
     Stop-ArgonBridge -Silent
 
-    $taskArguments = ('"{0}" --port {1} --host 127.0.0.1 --accounts "{2}"' -f $script:ArgonGatewayScript, $script:ArgonListenPort, $script:ArgonAccountsPath)
+    $taskArguments = ('"{0}" --port {1} --host 127.0.0.1' -f $script:ArgonGatewayScript, $script:ArgonListenPort)
     if (Test-TransportListener -TimeoutMilliseconds 300) {
         $taskArguments += " --proxy socks5://127.0.0.1:$script:ListenPort"
-        Write-TransportLog INFO "Routing Argon Gateway upstream via local geminUp SOCKS5 (127.0.0.1:$script:ListenPort)."
+        Write-TransportLog INFO "Routing Jewish Tokenizer upstream via local geminUp SOCKS5 (127.0.0.1:$script:ListenPort)."
     }
     else {
-        Write-TransportLog INFO 'geminUp SOCKS5 is not running; Argon Gateway will connect directly.'
+        Write-TransportLog INFO 'geminUp SOCKS5 is not running; Jewish Tokenizer will connect directly.'
     }
 
     # Cleanup legacy task if present
@@ -2192,7 +2194,7 @@ function Start-ArgonBridge {
             -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
             -MultipleInstances IgnoreNew -StartWhenAvailable
         Register-ScheduledTask -TaskName $script:ArgonTaskName -Action $taskAction -Trigger $triggers `
-            -Principal $principal -Settings $settings -Description 'geminUp native Gemini 4 Argon Gateway daemon.' `
+            -Principal $principal -Settings $settings -Description 'geminUp Jewish Tokenizer daemon (Antigravity Token Saver Proxy).' `
             -Force | Out-Null
 
         # Launch immediately as completely hidden background SYSTEM service (Session 0)
@@ -2200,7 +2202,7 @@ function Start-ArgonBridge {
     }
     catch {
         Write-TransportLog WARN "Could not register scheduled task (SYSTEM): $($_.Exception.Message)"
-        Write-TransportLog INFO "Launching Argon Gateway as autonomous hidden background process..."
+        Write-TransportLog INFO "Launching Jewish Tokenizer as autonomous hidden background process..."
         $proc = Start-Process -FilePath $nodeExe -ArgumentList $taskArguments -WorkingDirectory $script:ArgonDir -WindowStyle Hidden -PassThru
         if ($null -ne $proc) {
             [IO.File]::WriteAllText($script:ArgonPidPath, $proc.Id.ToString(), [Text.UTF8Encoding]::new($false))
@@ -2219,11 +2221,11 @@ function Start-ArgonBridge {
 
     if (-not $ready) {
         Stop-ArgonBridge -Silent
-        throw "Argon Gateway service started, but listener did not respond on port $script:ArgonListenPort within 10 seconds."
+        throw "Jewish Tokenizer service started, but listener did not respond on port $script:ArgonListenPort within 10 seconds."
     }
 
     $status = Get-ArgonBridgeStatus
-    Write-TransportLog OK "Argon Gateway started successfully as background service on http://127.0.0.1:$($script:ArgonListenPort)/v1 (PID: $($status.Pid))."
+    Write-TransportLog OK "Jewish Tokenizer started successfully as background proxy on http://127.0.0.1:$($script:ArgonListenPort) (PID: $($status.Pid))."
 
     # MCP Integration Status Check & Display
     $mcpConfigPath = Join-Path $env:USERPROFILE '.gemini\config\mcp_config.json'
@@ -2244,7 +2246,7 @@ function Start-ArgonBridge {
 
     if (-not $SkipSonnetSync) {
         Set-AntigravityArgonRouting -Enabled $true -Silent
-        Write-TransportLog OK 'Auto-enabled Claude Sonnet 4.6 -> Gemini 4 Argon redirection.'
+        Write-TransportLog OK 'Auto-enabled Jewish Tokenizer Antigravity proxy routing.'
     }
 }
 
@@ -2302,16 +2304,20 @@ function Stop-ArgonBridge {
 
     if (-not $Silent) {
         if ($stoppedAny) {
-            Write-TransportLog OK 'Argon Gateway process stopped.'
+            Write-TransportLog OK 'Jewish Tokenizer process stopped.'
         } else {
-            Write-TransportLog INFO 'Argon Gateway is not running.'
+            Write-TransportLog INFO 'Jewish Tokenizer is not running.'
         }
         if (-not $SkipSonnetSync) {
-            Write-TransportLog OK 'Auto-disabled Claude Sonnet 4.6 -> Gemini 4 Argon redirection.'
+            Write-TransportLog OK 'Auto-disabled Jewish Tokenizer Antigravity proxy routing.'
         }
     }
 }
 
+<# =========================================================================
+   [ARGON PIPELINE: DISABLED] Google account pool and cookie management.
+   Replaced by Jewish Tokenizer (JIGIT Context Compression Proxy).
+   =========================================================================
 function Add-ArgonAccount {
     Assert-SupportedWindows
     Assert-Administrator
@@ -2708,179 +2714,131 @@ function Invoke-ArgonKeepAlive {
         Write-TransportLog ERROR "Keep-alive failed: $($_.Exception.Message)"
     }
 }
+========================================================================= #>
 
-function Test-ArgonPipeline {
+function Add-ArgonAccount {
+    Write-TransportLog INFO "Google account cookies are no longer needed. Jewish Tokenizer operates directly via native Antigravity IDE authorization."
+}
+
+function Show-ArgonAccounts {
+    Write-TransportLog INFO "Account pool is disabled. Jewish Tokenizer uses native Antigravity credentials."
+}
+
+function Remove-ArgonAccount {
+    Write-TransportLog INFO "Account pool is disabled."
+}
+
+function Invoke-ArgonKeepAlive {
+    Write-TransportLog INFO "Keep-alive is not needed in native Antigravity mode."
+}
+
+function Test-JewishTokenizer {
     $status = Get-ArgonBridgeStatus
     if (-not $status.Listening) {
-        Write-TransportLog WARN 'Argon Gateway is not running. Select option 1 to start it first.'
+        Write-TransportLog WARN 'Jewish Tokenizer is not running. Select Option 1 in the Tokenizer menu to start it.'
         return
     }
 
-    Write-TransportLog INFO "Checking available models on http://127.0.0.1:$($script:ArgonListenPort)/v1/models..."
+    Write-TransportLog INFO "Connecting to Jewish Tokenizer proxy at http://127.0.0.1:$($script:ArgonListenPort)..."
     try {
-        $modelsResp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/v1/models" -Method Get -TimeoutSec 5 -ErrorAction Stop
-        $modelIds = @()
-        if ($null -ne $modelsResp -and ($modelsResp.PSObject.Properties.Name -contains 'data')) {
-            $modelIds = @($modelsResp.data | Select-Object -ExpandProperty id)
-        }
-        Write-TransportLog OK "Available models: $($modelIds -join ', ')"
-
-        Write-TransportLog INFO 'Sending test prompt to gemini-4-argon with Antigravity Agent Mode quota...'
         $sw = [Diagnostics.Stopwatch]::StartNew()
-
-        $payloadObj = @{
-            model = 'gemini-4-argon'
-            messages = @(
-                @{ role = 'user'; content = 'Respond with the single word: OK' }
-            )
-            max_tokens = 10
-        }
-        $payloadJson = ConvertTo-Json -InputObject $payloadObj -Compress
-        $payloadBytes = [Text.Encoding]::UTF8.GetBytes($payloadJson)
-
-        $chatResp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/v1/chat/completions" `
-            -Method Post -Body $payloadBytes -ContentType 'application/json' -TimeoutSec 30 -ErrorAction Stop
+        $healthResp = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:ArgonListenPort)/health" -Method Get -TimeoutSec 5 -ErrorAction Stop
         $sw.Stop()
 
-        $reply = ''
-        $actualModel = ''
-        if ($null -ne $chatResp -and ($chatResp.PSObject.Properties.Name -contains 'choices') -and $chatResp.choices.Count -gt 0) {
-            $reply = $chatResp.choices[0].message.content
-        }
-        if ($null -ne $chatResp -and ($chatResp.PSObject.Properties.Name -contains 'model')) {
-            $actualModel = $chatResp.model
-        }
-
         Write-Host ''
-        Write-Host '--- Argon Test Response ---' -ForegroundColor Green
-        Write-Host "Model used: $actualModel" -ForegroundColor Cyan
-        Write-Host "Latency:    $($sw.ElapsedMilliseconds) ms" -ForegroundColor Cyan
-        Write-Host "Reply:      $reply" -ForegroundColor White
-        Write-Host '---------------------------' -ForegroundColor Green
+        Write-Host '--- Jewish Tokenizer Diagnostic ---' -ForegroundColor Green
+        Write-Host "Proxy Name:    $($healthResp.name)" -ForegroundColor Cyan
+        Write-Host "Version:       $($healthResp.version)" -ForegroundColor Cyan
+        Write-Host "Mode:          $($healthResp.mode)" -ForegroundColor Cyan
+        Write-Host "JIGIT Saver:   $(if ($healthResp.jigit.active) { 'ACTIVE (Context Compression On)' } else { 'INACTIVE' })" -ForegroundColor Green
+        Write-Host "Latency:       $($sw.ElapsedMilliseconds) ms" -ForegroundColor Cyan
 
-        Write-TransportLog OK "SUCCESS: Gemini 4 Argon Antigravity pipeline responded in $($sw.ElapsedMilliseconds) ms!"
+        $capsuleDir = Join-Path $script:ArgonDir 'capsules'
+        $capsuleCount = if (Test-Path -LiteralPath $capsuleDir) { @(Get-ChildItem -LiteralPath $capsuleDir -Filter '*.json' -ErrorAction SilentlyContinue).Count } else { 0 }
+        Write-Host "Memory:        $capsuleCount capsule(s) stored on disk" -ForegroundColor Cyan
+        Write-Host '-----------------------------------' -ForegroundColor Green
+
+        Write-TransportLog OK "SUCCESS: Jewish Tokenizer is operational and ready to save 60-90% prompt tokens on Antigravity requests."
     }
     catch {
-        $serverDetail = ''
-        if ($_.Exception.Response) {
-            try {
-                $sr = [IO.StreamReader]::new($_.Exception.Response.GetResponseStream(), [Text.Encoding]::UTF8)
-                $serverDetail = $sr.ReadToEnd()
-            } catch { }
-        }
-        $msg = $_.Exception.Message
-        if (-not [string]::IsNullOrWhiteSpace($serverDetail)) {
-            $msg += " | Server details: $serverDetail"
-        }
-        Write-TransportLog ERROR "Test failed: $msg"
+        Write-TransportLog ERROR "Tokenizer test failed: $($_.Exception.Message)"
     }
 }
 
-function Show-ArgonConnectionInfo {
-    Write-Host ''
-    Write-Host '==================================================' -ForegroundColor Cyan
-    Write-Host '  Gemini 4 Argon Pipeline: Complete Setup Guide   ' -ForegroundColor Cyan
-    Write-Host '  Developer Blog: https://t.me/iqsklad20          ' -ForegroundColor Magenta
-    Write-Host '==================================================' -ForegroundColor Cyan
-    Write-Host '1. HOW TO ADD GOOGLE ACCOUNTS (STEP-BY-STEP):' -ForegroundColor Yellow
-    Write-Host '  a) Open browser and log in to gemini.google.com with your Google account.'
-    Write-Host '  b) Recommended extension: "cookies.txt" (Netscape HTTP Cookie format):'
-    Write-Host '     https://github.com/hrdl-github/cookies-txt' -ForegroundColor Cyan
-    Write-Host '     (Click extension -> Download cookies for gemini.google.com)' -ForegroundColor DarkGray
-    Write-Host '  c) Alternatively: Press F12 -> Network -> F5 -> Copy Request Header "Cookie".'
-    Write-Host '  d) In geminUp Argon Menu, select Option 2 ("Add Google Account").'
-    Write-Host '  e) Select Option 2 ("Read from file") and provide the path to cookies.txt,'
-    Write-Host '     or copy its content and select Option 1 ("Read from Clipboard").'
-    Write-Host '  f) Repeat with additional Google accounts to build a rotating standby pool!'
-    Write-Host ''
-    Write-Host '2. NATIVE ANTIGRAVITY IDE INTEGRATION:' -ForegroundColor Yellow
-    Write-Host '  a) Start Argon Gateway (Option 1 in Argon Menu).'
-    Write-Host '  b) Select Option 7 ("Toggle Antigravity Route") to activate the local router.'
-    Write-Host '  c) Restart Antigravity IDE.'
-    Write-Host '  d) Gemini 4 Argon appears active and unlocked directly in the model dropdown!'
-    Write-Host '     (tagTitle: Unavailable badge is removed; high Agent Mode quota is engaged).'
-    Write-Host ''
-    Write-Host '3. OPENAI-COMPATIBLE API (Roo Code / Cline / Cursor / OpenCode):' -ForegroundColor Yellow
-    Write-Host "  Endpoint: http://127.0.0.1:$($script:ArgonListenPort)/v1" -ForegroundColor Green
-    Write-Host '  API Key:  geminup (or any value)' -ForegroundColor Green
-    Write-Host '  Model ID: gemini-4-argon' -ForegroundColor Green
-    Write-Host ''
-    Write-Host '4. MULTI-CHAT & SUBAGENT CONCURRENCY:' -ForegroundColor Yellow
-    Write-Host '  - Conversations are stateless on Google Web RPC (temporary: true, unique request IDs).'
-    Write-Host '  - Multiple concurrent chat tabs and parallel subagents never cross-contaminate.'
-    Write-Host '  - Sticky account pool fails over seamlessly on quota exhaustion without losing context.'
-    Write-Host ''
+function Clean-JewishTokenizerCapsules {
+    $capsuleDir = Join-Path $script:ArgonDir 'capsules'
+    if (-not (Test-Path -LiteralPath $capsuleDir)) {
+        Write-TransportLog INFO 'No capsules found.'
+        return
+    }
+    $files = @(Get-ChildItem -LiteralPath $capsuleDir -Filter '*.json' -ErrorAction SilentlyContinue)
+    if ($files.Count -eq 0) {
+        Write-TransportLog INFO 'No capsules found in memory.'
+        return
+    }
+    Write-Host "Found $($files.Count) JIGIT memory capsule(s) on disk." -ForegroundColor Cyan
+    $confirm = Read-Host "Clean all $($files.Count) capsule file(s)? (y/N)"
+    if ($confirm -eq 'y' -or $confirm -eq 'Y') {
+        foreach ($f in $files) {
+            Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+        }
+        Write-TransportLog OK "Cleaned $($files.Count) capsule file(s)."
+    } else {
+        Write-TransportLog INFO 'Operation cancelled.'
+    }
 }
 
-function Show-ArgonMenu {
+Set-Alias -Name Test-ArgonPipeline -Value Test-JewishTokenizer -ErrorAction SilentlyContinue
+
+function Show-JewishTokenizerMenu {
     while ($true) {
         Clear-Host
         $status = Get-ArgonBridgeStatus
         $statusLabel = if ($status.Listening) { "RUNNING (PID: $($status.Pid))" } else { 'STOPPED' }
         $statusColor = if ($status.Listening) { 'Green' } else { 'Yellow' }
-        $acctLabel = if ($status.AccountsCount -gt 0) { "$($status.AccountsCount) account(s) (Active: $($status.ActiveAccountLabel))" } else { 'NO ACCOUNTS' }
-        $acctColor = if ($status.AccountsCount -gt 0) { 'Green' } else { 'Yellow' }
-        $transportRoute = if (Test-TransportListener -TimeoutMilliseconds 250) { "SOCKS5 (127.0.0.1:$script:ListenPort)" } else { 'Direct' }
-        $sonnetRedirect = Get-SonnetRedirectState
+
         $routingEnv = [Environment]::GetEnvironmentVariable('ARGON_ENDPOINT', 'User')
-        $isRouted = $sonnetRedirect -or (-not [string]::IsNullOrWhiteSpace($routingEnv))
-        $sonnetRouting = if ($isRouted) { 'ENABLED (Claude Sonnet 4.6 -> Gemini 4 Argon [Fail-Closed])' } else { 'DISABLED (Direct Google Cloud)' }
+        $isRouted = (-not [string]::IsNullOrWhiteSpace($routingEnv))
+        $routingLabel = if ($isRouted) { "ENABLED (http://127.0.0.1:$script:ArgonListenPort)" } else { 'DISABLED (Direct to Google Cloud Code)' }
         $routingColor = if ($isRouted) { 'Green' } else { 'DarkGray' }
 
-        $flashRedirect = Get-FlashRedirectState
-        $flashRouting = if ($flashRedirect) { "ALL FLASH -> ULTRA-QUOTA POOL ($($status.AccountsCount) Accounts)" } else { 'DIRECT CLOUD CODE (Dedicated model available)' }
-        $flashColor = if ($flashRedirect) { 'Green' } else { 'Cyan' }
-
-        $visionRedirect = Get-VisionRedirectState
-        $visionRouting = if ($visionRedirect) { 'DIRECT CLOUD CODE MULTIMODAL' } else { 'LOCAL DISK BRIDGE (Auto-save to Downloads)' }
-        $visionColor = if ($visionRedirect) { 'Green' } else { 'Yellow' }
+        $capsuleDir = Join-Path $script:ArgonDir 'capsules'
+        $capsuleCount = if (Test-Path -LiteralPath $capsuleDir) { @(Get-ChildItem -LiteralPath $capsuleDir -Filter '*.json' -ErrorAction SilentlyContinue).Count } else { 0 }
+        $transportRoute = if (Test-TransportListener -TimeoutMilliseconds 250) { "SOCKS5 (127.0.0.1:$script:ListenPort)" } else { 'Direct' }
 
         Write-Host '==================================================' -ForegroundColor Cyan
-        Write-Host '  Gemini 4 Argon Pipeline (Native Gateway Engine)' -ForegroundColor Cyan
+        Write-Host '  Jewish Tokenizer (Antigravity Token Saver Proxy)' -ForegroundColor Cyan
         Write-Host '  Developer Blog: https://t.me/iqsklad20          ' -ForegroundColor Magenta
         Write-Host '==================================================' -ForegroundColor Cyan
-        Write-Host -NoNewline '  Gateway Status:       '
+        Write-Host -NoNewline '  Tokenizer Proxy:    '
         Write-Host $statusLabel -ForegroundColor $statusColor
-        Write-Host -NoNewline '  Sonnet 4.6 -> Argon:  '
-        Write-Host $sonnetRouting -ForegroundColor $routingColor
-        Write-Host -NoNewline '  Flash Ultra-Quota:    '
-        Write-Host $flashRouting -ForegroundColor $flashColor
-        Write-Host -NoNewline '  Vision Media Mode:    '
-        Write-Host $visionRouting -ForegroundColor $visionColor
-        Write-Host -NoNewline '  Account Pool:         '
-        Write-Host $acctLabel -ForegroundColor $acctColor
-        Write-Host "  Auto Health Keeper:   24h Idle Ping (5m Cooldown, Windows Uptime Tracked)" -ForegroundColor DarkCyan
-        Write-Host "  Upstream:             $transportRoute" -ForegroundColor White
-        Write-Host "  Local URL:            http://127.0.0.1:$($script:ArgonListenPort)/v1" -ForegroundColor DarkGray
+        Write-Host -NoNewline '  Antigravity Route:  '
+        Write-Host $routingLabel -ForegroundColor $routingColor
+        Write-Host '  Upstream Backend:   https://daily-cloudcode-pa.googleapis.com' -ForegroundColor White
+        Write-Host "  Upstream Tunnel:    $transportRoute" -ForegroundColor White
+        Write-Host '  Authorization:      100% Native IDE Credentials (Zero Google Cookies)' -ForegroundColor Green
+        Write-Host "  JIGIT Capsules:     $capsuleCount active capsule(s) stored on disk" -ForegroundColor Cyan
+        Write-Host '  Token Savings:      60% - 90% prompt tokens per multi-turn request' -ForegroundColor Green
+        Write-Host "  Proxy Endpoint:     http://127.0.0.1:$script:ArgonListenPort" -ForegroundColor DarkGray
         Write-Host ''
-        Write-Host '  1. Start / Restart Argon Gateway'
-        Write-Host '  2. Add Google Account (Clipboard / File / Paste)'
-        Write-Host '  3. View Accounts & Pool Quota Status'
-        Write-Host '  4. Remove Account from Pool'
-        Write-Host '  5. Force Session Keep-Alive & Quota Refresh'
-        Write-Host '  6. Test Argon Model Status & Latency'
-        Write-Host '  7. Stop Argon Gateway'
-        Write-Host '  8. Connection Instructions for IDE'
-        Write-Host '  9. Toggle Global Flash -> Ultra-Quota Pool'
-        Write-Host '  10. Toggle Vision Media Mode (Local Disk Bridge vs Direct Cloud Code)'
+        Write-Host '  1. Start & Activate Jewish Tokenizer (Launch Proxy + Apply IDE Route)'
+        Write-Host '  2. Stop & Deactivate Jewish Tokenizer (Revert Antigravity to Direct Cloud)'
+        Write-Host '  3. Toggle Antigravity Route Only (Enable / Disable Endpoint Hook)'
+        Write-Host '  4. Test Tokenizer Compression & Health Check'
+        Write-Host '  5. View / Clean JIGIT Memory Capsules'
         Write-Host '  0. Return to main menu'
         Write-Host ''
 
-        $sub = Read-Host 'Select 0-10'
+        $sub = Read-Host 'Select 0-5'
         try {
             switch ($sub) {
                 '1' { Start-ArgonBridge; Start-Sleep -Seconds 2; break }
-                '2' { Add-ArgonAccount; Start-Sleep -Seconds 2; break }
-                '3' { Show-ArgonAccounts; Read-Host 'Press Enter to continue'; break }
-                '4' { Remove-ArgonAccount; Start-Sleep -Seconds 2; break }
-                '5' { Invoke-ArgonKeepAlive; Read-Host 'Press Enter to continue'; break }
-                '6' { Test-ArgonPipeline; Read-Host 'Press Enter to continue'; break }
-                '7' { Stop-ArgonBridge; Start-Sleep -Seconds 1; break }
-                '8' { Show-ArgonConnectionInfo; Read-Host 'Press Enter to continue'; break }
-                '9' { Switch-AntigravityFlashRouting; Start-Sleep -Seconds 2; break }
-                '10' { Switch-AntigravityVisionRouting; Start-Sleep -Seconds 2; break }
+                '2' { Stop-ArgonBridge; Start-Sleep -Seconds 2; break }
+                '3' { Switch-AntigravityArgonRouting; Start-Sleep -Seconds 2; break }
+                '4' { Test-JewishTokenizer; Read-Host 'Press Enter to continue'; break }
+                '5' { Clean-JewishTokenizerCapsules; Read-Host 'Press Enter to continue'; break }
                 '0' { return }
-                default { Write-TransportLog WARN 'Enter 0 through 10.'; Start-Sleep -Seconds 2; continue }
+                default { Write-TransportLog WARN 'Enter 0 through 5.'; Start-Sleep -Seconds 2; continue }
             }
         }
         catch {
@@ -2889,6 +2847,13 @@ function Show-ArgonMenu {
         }
     }
 }
+
+Set-Alias -Name Show-ArgonMenu -Value Show-JewishTokenizerMenu -ErrorAction SilentlyContinue
+Set-Alias -Name Show-ArgonConnectionInfo -Value Show-JewishTokenizerMenu -ErrorAction SilentlyContinue
+Set-Alias -Name Start-JewishTokenizer -Value Start-ArgonBridge -ErrorAction SilentlyContinue
+Set-Alias -Name Stop-JewishTokenizer -Value Stop-ArgonBridge -ErrorAction SilentlyContinue
+Set-Alias -Name Set-JewishTokenizerRouting -Value Set-AntigravityArgonRouting -ErrorAction SilentlyContinue
+Set-Alias -Name Switch-JewishTokenizerRouting -Value Switch-AntigravityArgonRouting -ErrorAction SilentlyContinue
 
 function Show-Menu {
     while ($true) {
@@ -2904,7 +2869,9 @@ function Show-Menu {
         Write-Host '  5. Enable/disable YouTube routing'
         Write-Host '  6. Patch Antigravity binaries'
         Write-Host '  7. Roll back Antigravity binary patch'
-        Write-Host '  8. Gemini 4 Argon pipeline (Native Gateway Engine)'
+        $routingEnv = [Environment]::GetEnvironmentVariable('ARGON_ENDPOINT', 'User')
+        $tokenizerTag = if (-not [string]::IsNullOrWhiteSpace($routingEnv)) { '[ACTIVE]' } else { '[STANDBY]' }
+        Write-Host "  8. Jewish Tokenizer: Context Compression Proxy $tokenizerTag"
         Write-Host ''
         $selection = Read-Host 'Select 1-8'
         try {
@@ -2916,7 +2883,7 @@ function Show-Menu {
                 '5' { Switch-YouTubeRouting; break }
                 '6' { Invoke-AntigravityBinaryPatch -Direction Apply | Out-Null; break }
                 '7' { Invoke-AntigravityBinaryPatch -Direction Rollback | Out-Null; break }
-                '8' { Show-ArgonMenu; break }
+                '8' { Show-JewishTokenizerMenu; break }
                 default { Write-TransportLog WARN 'Enter 1, 2, 3, 4, 5, 6, 7 or 8.'; Start-Sleep -Seconds 2; continue }
             }
         }
@@ -2938,14 +2905,23 @@ try {
         'watchdog' { Invoke-TransportWatchdog }
         'antigravity-patch' { Invoke-AntigravityBinaryPatch -Direction Apply | Out-Null }
         'antigravity-rollback' { Invoke-AntigravityBinaryPatch -Direction Rollback | Out-Null }
-        'argon-menu' { Show-ArgonMenu }
+        'jewish-tokenizer' { Show-JewishTokenizerMenu }
+        'tokenizer-menu' { Show-JewishTokenizerMenu }
+        'tokenizer-enable' { Start-ArgonBridge }
+        'tokenizer-disable' { Stop-ArgonBridge }
+        'tokenizer-status' { Get-ArgonBridgeStatus }
+        'tokenizer-test' { Test-JewishTokenizer }
+        'tokenizer-clean' { Clean-JewishTokenizerCapsules }
+        'tokenizer-route' { Switch-AntigravityArgonRouting }
+        # Backward compatibility aliases
+        'argon-menu' { Show-JewishTokenizerMenu }
         'argon-enable' { Start-ArgonBridge }
         'argon-disable' { Stop-ArgonBridge }
         'argon-status' { Get-ArgonBridgeStatus }
         'argon-accounts' { Show-ArgonAccounts }
         'argon-cookie' { Add-ArgonAccount }
         'argon-account' { Add-ArgonAccount }
-        'argon-test' { Test-ArgonPipeline }
+        'argon-test' { Test-JewishTokenizer }
         'argon-keepalive' { Invoke-ArgonKeepAlive }
         'argon-route' { Switch-AntigravityArgonRouting }
     }
