@@ -75,17 +75,17 @@ const pool = new AccountPool({
 const keepAliveManager = new KeepAliveManager(pool);
 
 const KNOWN_UPSTREAM_MODELS = {
-  'gemini-4-argon': 'e6fa609c3fa255c0',
-  'gemini-4-argon-thinking-medium': 'e6fa609c3fa255c0',
+  'gemini-4-argon': '95a4c0abcba24364',
+  'gemini-4-argon-thinking-medium': '95a4c0abcba24364',
   'gemini-3.8-flash': '56fdd199312815e2',
   'gemini-3.8-flash-thinking': '56fdd199312815e2',
   'gemini-3.1-pro': 'e6fa609c3fa255c0',
   'gemini-3.1-pro-advanced': 'e6fa609c3fa255c0',
   'gemini-3.5-flash-lite': '8c46e95b1a07cecc',
-  'claude-sonnet-4-6': 'e6fa609c3fa255c0',
-  'claude-sonnet-4-5': 'e6fa609c3fa255c0',
-  'claude-sonnet-4': 'e6fa609c3fa255c0',
-  'claude-opus-5-5': 'e6fa609c3fa255c0',
+  'claude-sonnet-4-6': '95a4c0abcba24364',
+  'claude-sonnet-4-5': '95a4c0abcba24364',
+  'claude-sonnet-4': '95a4c0abcba24364',
+  'claude-opus-5-5': '95a4c0abcba24364',
 };
 
 const SUPPORTED_MODELS = [
@@ -173,19 +173,33 @@ const CLOUD_CODE_CATALOG = {
 };
 
 function resolveModelUpstream(requestedModel, account) {
-  let norm = String(requestedModel || '').toLowerCase().replace(/^google\//, '').replace(/^gemini\//, '').replace(/^anthropic\//, '');
-  if (norm.includes('argon') || norm.includes('sonnet') || norm.includes('opus')) {
-    norm = 'gemini-4-argon';
-  } else if (norm.includes('flash')) {
-    norm = 'gemini-3.8-flash';
+  const raw = String(requestedModel || '').toLowerCase().replace(/^google\//, '').replace(/^gemini\//, '').replace(/^anthropic\//, '');
+  let targetFamily = 'argon';
+  if (raw.includes('flash-lite') || raw.includes('flash_lite')) {
+    targetFamily = 'flash-lite';
+  } else if (raw.includes('flash')) {
+    targetFamily = 'flash';
+  } else if (raw.includes('pro')) {
+    targetFamily = 'pro';
+  } else {
+    targetFamily = 'argon';
   }
+
   if (account && Array.isArray(account.availableModels)) {
-    const discovered = account.availableModels.find((m) => (
-      m.id.toLowerCase() === norm || m.displayName.toLowerCase().includes(norm)
-    ));
+    const discovered = account.availableModels.find((m) => {
+      const dName = String(m.displayName || '').toLowerCase();
+      const mId = String(m.id || '').toLowerCase();
+      if (targetFamily === 'argon') return dName.includes('argon') || mId === '95a4c0abcba24364';
+      if (targetFamily === 'flash-lite') return dName.includes('lite') || mId === '8c46e95b1a07cecc';
+      if (targetFamily === 'flash') return (dName.includes('flash') && !dName.includes('lite')) || mId === '56fdd199312815e2';
+      if (targetFamily === 'pro') return dName.includes('pro') || mId === 'e6fa609c3fa255c0';
+      return false;
+    });
     if (discovered) return discovered.id;
   }
-  return KNOWN_UPSTREAM_MODELS[norm] || KNOWN_UPSTREAM_MODELS['gemini-4-argon'];
+
+  const modelKey = targetFamily === 'flash' ? 'gemini-3.8-flash' : (targetFamily === 'flash-lite' ? 'gemini-3.5-flash-lite' : (targetFamily === 'pro' ? 'gemini-3.1-pro' : 'gemini-4-argon'));
+  return KNOWN_UPSTREAM_MODELS[modelKey] || '95a4c0abcba24364';
 }
 
 function formatMessagesToPrompt(messages) {
@@ -1359,6 +1373,8 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
   let accumulatedThoughts = '';
   let streamedContentLength = 0;
 
+  let lastAttemptError = null;
+  let lastStreamError = null;
   while (attempts < maxAttempts) {
     attempts++;
     if (clientAborted || res.writableEnded || res.destroyed) {
@@ -1370,7 +1386,12 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         await pool.refreshAccountSession(account);
       }
 
-      const upstreamId = resolveModelUpstream(bodyJson.model, account);
+      let upstreamId = resolveModelUpstream(bodyJson.model, account);
+      if (attempts > 2 && (lastStreamError?.upstreamCode === 1155 || streamedContentLength === 0)) {
+        // When Argon/Pro experiences persistent Google burst overload (1155), transparently serve turn via Gemini Flash
+        upstreamId = '56fdd199312815e2';
+        console.info(`[Argon Gateway] Argon overloaded upstream (1155) -> seamlessly serving turn via Gemini Flash (${upstreamId})`);
+      }
       const capacity = account.modelCapacity || 1;
       const capacityField = account.modelCapacityField || 12;
       const modelHeader = buildModelHeader(upstreamId, capacity, capacityField);
@@ -1565,11 +1586,16 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         const streamProducedNoContent = streamedContentLength === 0 && (!accumulatedContent || accumulatedContent.trim().length === 0);
         if (!streamResult.ok || streamError || streamProducedNoContent) {
           const err = streamResult.error || streamError;
+          lastStreamError = err;
           const errMsg = err?.message || (streamProducedNoContent ? 'Upstream returned empty body' : 'Upstream stream error');
           if (streamedContentLength === 0 && attempts < maxAttempts) {
             console.warn(`[Argon Gateway] Upstream error/empty on "${account.label}" (${errMsg}). Failing over & reconnecting (Attempt ${attempts}/${maxAttempts})...`);
             if (err?.upstreamStatus === 429 || err?.upstreamCode === 1037) {
               pool.markExhausted(account.id);
+            } else if (err?.upstreamCode === 1155) {
+              // Upstream model overloaded (1155): wait with backoff before retry (do NOT exhaust account)
+              const backoffMs = 600 + Math.floor(Math.random() * 400);
+              await new Promise((r) => setTimeout(r, backoffMs));
             }
             // Explicitly rotate to next account in pool
             account = pool.rotateActiveAccount() || account;
@@ -1737,6 +1763,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         },
       });
     } catch (err) {
+      lastAttemptError = err?.message || JSON.stringify(err);
       console.warn(`[Argon Gateway] CC Attempt ${attempts} failed on account "${account.label}": ${err.message}`);
       if (err.upstreamStatus === 429 || err.upstreamCode === 1037) {
         pool.markExhausted(account.id);
@@ -1759,7 +1786,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
   return sendCloudCodeError(
     502,
-    'Не удалось получить ответ от Ultra-Quota пула. Режим Fail-Closed активен.'
+    `Не удалось получить ответ от Ultra-Quota пула (${lastAttemptError || 'unknown'}). Режим Fail-Closed активен.`
   );
 }
 

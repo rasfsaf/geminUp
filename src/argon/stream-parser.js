@@ -26,70 +26,91 @@ function createStreamError(code) {
 
 /**
  * Parses Google chunked wire format from Buffer or string.
- * CRITICAL: Google upstream wire format transmits byte-length markers, NOT character length.
- * Parsing in byte domain prevents multibyte UTF-8 characters (Russian, CJK, emoji) from truncating or crashing frames.
+ * Supports character-domain UTF-16 length markers and multibyte UTF-8 payloads (Russian, CJK, emojis).
  */
 function parseGoogleFrames(input) {
-  let buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input || ''), 'utf8');
+  let text = typeof input === 'string' ? input : (Buffer.isBuffer(input) ? input.toString('utf8') : String(input || ''));
 
-  // Strip XSSI prefix
-  const xssiBytes = Buffer.from(XSSI_PREFIX);
-  if (buf.length >= xssiBytes.length && buf.subarray(0, xssiBytes.length).equals(xssiBytes)) {
-    buf = buf.subarray(xssiBytes.length);
+  // Strip XSSI prefix )]}'
+  if (text.startsWith(XSSI_PREFIX)) {
+    text = text.slice(XSSI_PREFIX.length);
   }
 
   const frames = [];
   let pos = 0;
 
-  while (pos < buf.length) {
-    // Skip whitespace (spaces, newlines, carriage returns, tabs)
-    while (pos < buf.length && (buf[pos] === 32 || buf[pos] === 10 || buf[pos] === 13 || buf[pos] === 9)) {
+  while (pos < text.length) {
+    // Skip any whitespace (spaces, newlines, carriage returns)
+    while (pos < text.length && /\s/.test(text[pos])) {
       pos++;
     }
-    if (pos >= buf.length) break;
+    if (pos >= text.length) break;
 
     // Read ASCII digit length marker
     let digitEnd = pos;
-    while (digitEnd < buf.length && buf[digitEnd] >= 48 && buf[digitEnd] <= 57) {
+    while (digitEnd < text.length && text[digitEnd] >= '0' && text[digitEnd] <= '9') {
       digitEnd++;
     }
-    if (digitEnd === pos) {
-      break;
-    }
+    if (digitEnd === pos) break;
 
-    const length = parseInt(buf.subarray(pos, digitEnd).toString('ascii'), 10);
-    // In Google wire format, the length marker is followed by optional whitespace / newline delimiter before payload
+    const charLen = parseInt(text.slice(pos, digitEnd), 10);
     let start = digitEnd;
-    while (start < buf.length && (buf[start] === 32 || buf[start] === 10 || buf[start] === 13 || buf[start] === 9)) {
+    while (start < text.length && (text[start] === ' ' || text[start] === '\r')) {
       start++;
     }
-    const end = start + length;
+    if (start < text.length && text[start] === '\n') {
+      start++; // skip delimiter \n
+    }
 
-    if (end > buf.length) {
-      // Incomplete frame, wait for next network chunk
+    let end = start + charLen;
+    if (end > text.length) {
+      // Incomplete frame, wait for next network packet
       break;
     }
 
-    const frameBuf = buf.subarray(start, end);
-    pos = end;
-
-    const rawStr = frameBuf.toString('utf8').trim();
-    if (!rawStr) continue;
+    let rawStr = text.slice(start, end).trim();
+    let parsed = null;
+    let actualEnd = end;
 
     try {
-      const parsed = JSON.parse(rawStr);
-      frames.push(parsed);
+      parsed = JSON.parse(rawStr);
     } catch {
-      continue;
+      // Fuzzy boundary adjustment for variations in length calculation
+      for (const off of [-1, 1, -2, 2, -3, 3]) {
+        try {
+          const altStr = text.slice(start, end + off).trim();
+          parsed = JSON.parse(altStr);
+          actualEnd = end + off;
+          break;
+        } catch {}
+      }
+    }
+
+    if (parsed) {
+      frames.push(parsed);
+      pos = actualEnd;
+    } else {
+      // Robust fallback: search for envelope closing ']]'
+      const bracketIdx = text.indexOf(']]', start);
+      if (bracketIdx !== -1 && bracketIdx < start + charLen + 60) {
+        try {
+          parsed = JSON.parse(text.slice(start, bracketIdx + 2).trim());
+          frames.push(parsed);
+          pos = bracketIdx + 2;
+        } catch {
+          pos = end;
+        }
+      } else {
+        pos = end;
+      }
     }
   }
 
-  const remainderBuf = buf.subarray(pos);
+  const remainderStr = text.slice(pos);
   return {
     frames,
-    remainder: remainderBuf,
-    // Provide string representation for backward compatibility
-    remainderStr: remainderBuf.toString('utf8'),
+    remainder: Buffer.from(remainderStr, 'utf8'),
+    remainderStr,
   };
 }
 
@@ -99,28 +120,35 @@ function parseGeminiStream(frames) {
   let metadata = null;
   let errorToThrow = null;
 
-  for (const part of frames) {
-    const errorCode = Number(nested(part, [5, 2, 0, 1, 0], 0));
-    if (errorCode) {
-      errorToThrow = createStreamError(errorCode);
-      if (errorCode !== 1100) throw errorToThrow;
-    }
+  for (const envelope of frames) {
+    // Envelope can be [[...]] or [...]
+    const parts = Array.isArray(envelope) ? (Array.isArray(envelope[0]) ? envelope : [envelope]) : [];
+    for (const part of parts) {
+      if (!Array.isArray(part)) continue;
 
-    const encoded = nested(part, [2]);
-    if (typeof encoded !== 'string') continue;
-    let payload;
-    try { payload = JSON.parse(encoded); } catch { continue; }
-
-    if (Array.isArray(payload[1])) metadata = payload[1];
-    const candidates = Array.isArray(payload[4]) ? payload[4] : [];
-    for (const candidate of candidates) {
-      const candidateText = nested(candidate, [1, 0], '');
-      const candidateThoughts = nested(candidate, [37, 0, 0], '');
-      if (typeof candidateText === 'string' && candidateText.length >= content.length) {
-        content = candidateText;
+      // Extract error codes (e.g. 1155 overloaded, 1037 quota)
+      const errorCode = Number(nested(part, [5, 2, 0, 1, 0], 0));
+      if (errorCode) {
+        errorToThrow = createStreamError(errorCode);
+        if (errorCode !== 1100) throw errorToThrow;
       }
-      if (typeof candidateThoughts === 'string' && candidateThoughts.length >= thoughts.length) {
-        thoughts = candidateThoughts;
+
+      const encoded = part[2];
+      if (typeof encoded !== 'string') continue;
+      let payload;
+      try { payload = JSON.parse(encoded); } catch { continue; }
+
+      if (Array.isArray(payload[1])) metadata = payload[1];
+      const candidates = Array.isArray(payload[4]) ? payload[4] : [];
+      for (const candidate of candidates) {
+        const candidateText = nested(candidate, [1, 0], '');
+        const candidateThoughts = nested(candidate, [37, 0, 0], '');
+        if (typeof candidateText === 'string' && candidateText.length >= content.length) {
+          content = candidateText;
+        }
+        if (typeof candidateThoughts === 'string' && candidateThoughts.length >= thoughts.length) {
+          thoughts = candidateThoughts;
+        }
       }
     }
   }
