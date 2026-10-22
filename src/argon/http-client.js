@@ -66,8 +66,11 @@ function createSocks5Connection(proxyHost, proxyPort, targetHost, targetPort, ti
 function createAgent(proxyUrl) {
   if (!proxyUrl) {
     return new https.Agent({
-      keepAlive: false,
-      timeout: 300000,
+      keepAlive: true,
+      keepAliveMsecs: 15000,
+      maxSockets: 64,
+      maxFreeSockets: 16,
+      timeout: 120000,
     });
   }
 
@@ -77,8 +80,11 @@ function createAgent(proxyUrl) {
     const proxyPort = Number(parsed.port) || 1080;
 
     return new https.Agent({
-      keepAlive: false,
-      timeout: 300000,
+      keepAlive: true,
+      keepAliveMsecs: 15000,
+      maxSockets: 64,
+      maxFreeSockets: 16,
+      timeout: 120000,
       createConnection(options, callback) {
         createSocks5Connection(proxyHost, proxyPort, options.host, Number(options.port) || 443)
           .then((rawSocket) => {
@@ -104,8 +110,11 @@ function createAgent(proxyUrl) {
 
   // Fallback for standard HTTP proxy
   return new https.Agent({
-    keepAlive: false,
-    timeout: 300000,
+    keepAlive: true,
+    keepAliveMsecs: 15000,
+    maxSockets: 64,
+    maxFreeSockets: 16,
+    timeout: 120000,
   });
 }
 

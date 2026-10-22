@@ -485,7 +485,7 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
 function runJigitPipeline(turnsList, options = {}) {
   if (!Array.isArray(turnsList) || turnsList.length === 0) return [];
   const totalTurns = turnsList.length;
-  const keepRecentTurns = options.keepRecentTurns || 8;
+  const keepRecentTurns = options.keepRecentTurns || 2;
 
   const tracker = options.tracker || createCompressionTracker(options);
   const originalChars = JSON.stringify(turnsList).length;

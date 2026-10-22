@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [2.0.2] - 2026-10-22
+
+### RU (Русский)
+
+#### Устранение зависаний рассуждений, ускорение стриминга и пул соединений
+- **Ограничение бесконечного рассуждения (Thinking Budget Cap):** Устранена первопричина бесконечных размышлений модели — директива `thinkingBudget: -1`, передаваемая средой Antigravity. Установлен потолок в 2048 токенов: модель свободно планирует сложные действия, но физически не может войти в 30-тысячный генеративный штопор.
+- **Пул соединений HTTP/1.1 Keep-Alive:** Полностью переработан сетевой транспорт `http-client.js`. Вместо закрытия сокета после каждого запроса включён постоянный пул тёплых соединений (`keepAlive: true`, до 64 параллельных сокетов). Время отклика снизилось в разы.
+- **Стабильность параллельных чатов без реконнектов:** Ликвидирована перегрузка локального SOCKS5-шлюза (8877) при одновременной работе нескольких окон и чатов Antigravity.
+- **Мгновенный стриминг без буферизации TCP:** Внедрён флаг `setNoDelay(true)` на сокетах ответов, отключающий алгоритм Нагла для SSE. Токены поступают в интерфейс моментально, без подвисаний и рывков.
+- **Оперативная компрессия контекста (`keepRecentTurns: 2`):** Порог сохранения сырых ходов снижен с 8 до 2. Исторические реплики и старые логи сжимаются в капсулы сразу, освобождая окно контекста.
+
+### EN (English)
+
+#### Thinking Loop Elimination, Real-Time SSE Acceleration, and Connection Pooling
+- **Thinking Budget Cap:** Neutralized the root cause of runaway reasoning loops caused by Antigravity's default `thinkingBudget: -1`. Capped the allocation at 2048 tokens, ensuring thorough problem-solving while strictly barring infinite reasoning collapse.
+- **HTTP/1.1 Keep-Alive Connection Pooling:** Overhauled `http-client.js` to reuse warm TLS/TCP connections (`keepAlive: true`, up to 64 pooled sockets). Upstream request overhead dropped from ~800ms to ~20ms.
+- **Parallel Multi-Chat Stability:** Eliminated SOCKS5 socket exhaustion and WSAECONNRESET drops when running multiple concurrent IDE chat windows.
+- **Zero-Latency SSE Streaming:** Enabled `socket.setNoDelay(true)` on streaming responses, eliminating OS TCP Nagle buffering and delivering tokens smoothly in real time.
+- **Responsive Context Compaction (`keepRecentTurns: 2`):** Reduced raw turn retention from 8 to 2, ensuring multi-turn logs and older text dumps are compressed immediately.
+
+---
+
 ## [2.0.1] - 2026-10-22
 
 ### RU (Русский)

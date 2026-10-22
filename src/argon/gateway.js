@@ -1121,7 +1121,7 @@ async function forwardToGoogleCloudCode(req, res, reqBuffer, timeoutMs = 300000,
       delete headers['connection'];
       delete headers['keep-alive'];
       headers['host'] = 'daily-cloudcode-pa.googleapis.com';
-      headers['connection'] = 'close';
+      headers['connection'] = 'keep-alive';
 
       if (reqBuffer && reqBuffer.length > 0) {
         headers['content-length'] = String(Buffer.byteLength(reqBuffer));
@@ -1145,6 +1145,12 @@ async function forwardToGoogleCloudCode(req, res, reqBuffer, timeoutMs = 300000,
         delete resHeaders['connection'];
         delete resHeaders['keep-alive'];
         delete resHeaders['transfer-encoding'];
+
+        // Optimize client socket latency for real-time SSE streaming (disable Nagle buffering)
+        if (res.socket) {
+          res.socket.setNoDelay(true);
+        }
+
         res.writeHead(upstreamRes.statusCode, resHeaders);
         upstreamRes.pipe(res);
         upstreamRes.on('end', () => resolve(true));
@@ -2081,10 +2087,18 @@ async function handleCloudCodeWithJigit(req, res, rawBuf, isStream = true) {
         if (bodyJson.model) bodyJson.model = fallbackModel;
       }
 
+      // Cap thinkingBudget to prevent runaway mode-collapse and endless reasoning loops (30k+ tokens)
+      if (targetReq && targetReq.generationConfig && targetReq.generationConfig.thinkingConfig) {
+        const tb = targetReq.generationConfig.thinkingConfig.thinkingBudget;
+        if (tb === -1 || tb > 2048) {
+          targetReq.generationConfig.thinkingConfig.thinkingBudget = 2048;
+        }
+      }
+
       // Context optimization via Jewish Tokenizer / JIGIT Engine
       if (Array.isArray(targetContents) && targetContents.length > 0) {
         const runner = (jigitEngine && jigitEngine.runJigitPipeline) ? jigitEngine.runJigitPipeline : runJigitPipeline;
-        const optimizedContents = runner(targetContents, { conversationId });
+        const optimizedContents = runner(targetContents, { conversationId, keepRecentTurns: 2 });
         if (hasReqObj) {
           bodyJson.request.contents = optimizedContents;
         } else {
