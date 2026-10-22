@@ -1766,9 +1766,12 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         pool.markExhausted(account.id);
       } else if (err.upstreamCode === 1096 || err.upstreamStatus === 401) {
         pool.markError(account.id, 'Session expired; re-auth required');
+      } else {
+        // Network / socket error (e.g. ECONNRESET, aborted, timeout): back off briefly before failover
+        await new Promise((r) => setTimeout(r, 600));
       }
 
-      account = pool.getActiveAccount();
+      account = pool.rotateActiveAccount() || pool.getActiveAccount();
       if (!account) {
         if (isSonnet || isArgon || redirectConfig.failClosed) {
           const msg = isSonnet
