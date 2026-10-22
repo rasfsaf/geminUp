@@ -2,8 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const COOLDOWN_MS = 5 * 60 * 1000; // 5-minute cooldown between keep-alive pings
-const IDLE_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const COOLDOWN_MS = 3 * 60 * 1000; // 3-minute cooldown between keep-alive pings across accounts
+const IDLE_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours (keeps Google __Secure-1PSIDTS rolling token alive)
 const TICK_INTERVAL_MS = 30 * 1000; // Check state every 30 seconds
 
 class KeepAliveManager {

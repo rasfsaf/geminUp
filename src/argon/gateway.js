@@ -897,7 +897,7 @@ function getRedirectConfig() {
       };
     }
   } catch { }
-  return { enabled: true, redirectFlashToPool: false, passVisionToCloudCode: true, failClosed: false };
+  return { enabled: true, redirectFlashToPool: false, passVisionToCloudCode: true, failClosed: true };
 }
 
 // Transparent upstream proxy to real Google Cloud Code endpoint for metadata & handshake
@@ -1094,15 +1094,55 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
     console.info(`[Argon Gateway] [PIPE ACTIVE] Intercepted Gemini Flash Ultra-Quota request -> Serving with pool (${pool.accounts.length} accounts active)`);
   }
 
+  const sendCloudCodeError = (statusCode, message) => {
+    if (isStream) {
+      if (!res.headersSent) {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+          'Access-Control-Allow-Origin': '*',
+        });
+      }
+      const errChunk = {
+        response: {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: `⚠️ **[geminUp Argon Gateway]**\n\n${message}` }],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        },
+      };
+      res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
+      res.end();
+      return;
+    }
+    return sendJson(res, 200, {
+      response: {
+        candidates: [
+          {
+            content: {
+              role: 'model',
+              parts: [{ text: `⚠️ **[geminUp Argon Gateway]**\n\n${message}` }],
+            },
+            finishReason: 'STOP',
+          },
+        ],
+      },
+    });
+  };
+
   let account = pool.getActiveAccount();
   if (!account) {
-    if (redirectConfig.failClosed) {
-      return sendError(
-        res,
-        429,
-        'All Google accounts in pool are currently exhausted or unavailable. Fail-Closed quota protection engaged.',
-        'quota_exhausted',
-      );
+    if (isSonnet || isArgon || redirectConfig.failClosed) {
+      const msg = isSonnet
+        ? 'Claude Sonnet перенаправлен на Gemini 4 Argon, но все Google-аккаунты в пуле Ultra-Quota сейчас недоступны или их сессии истекли.\n\n🔒 **Сработала защита Fail-Closed**, чтобы предотвратить расход вашей реальной квоты Claude Sonnet в IDE.\n\nПожалуйста, обновите сессию аккаунтов в пуле через `.\\geminUp.ps1 -Action argon-cookie`.'
+        : 'Все Google-аккаунты в пуле Ultra-Quota сейчас недоступны или их сессии истекли. Пожалуйста, обновите сессию через `.\\geminUp.ps1 -Action argon-cookie`.';
+      return sendCloudCodeError(429, msg);
     }
     return await forwardToGoogleCloudCode(req, res, rawBuf);
   }
@@ -1418,7 +1458,23 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
         upstreamRes.body.on('error', (err) => {
           console.error(`[Argon Gateway] Cloud Code stream error: ${err.message}`);
-          if (!res.writableEnded && !res.destroyed) res.end();
+          if (!res.writableEnded && !res.destroyed) {
+            const errChunk = {
+              response: {
+                candidates: [
+                  {
+                    content: {
+                      role: 'model',
+                      parts: [{ text: `\n\n⚠️ **[geminUp Argon Gateway Stream Error]**: ${err.message}` }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              },
+            };
+            try { res.write(`data: ${JSON.stringify(errChunk)}\n\n`); } catch { }
+            res.end();
+          }
         });
 
         return;
@@ -1477,15 +1533,21 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
       account = pool.getActiveAccount();
       if (!account) {
-        if (redirectConfig.failClosed) {
-          return sendError(res, 429, 'All accounts in geminUp pool exhausted during failover. Primary project protected.', 'quota_exhausted');
+        if (isSonnet || isArgon || redirectConfig.failClosed) {
+          const msg = isSonnet
+            ? 'Все Google-аккаунты в пуле Ultra-Quota исчерпали квоту или их сессии истекли во время переключения.\n\n🔒 **Сработала защита Fail-Closed**: запрос заблокирован для защиты вашей реальной квоты Claude Sonnet. Пожалуйста, обновите сессии через `.\\geminUp.ps1 -Action argon-cookie`.'
+            : 'Все аккаунты в пуле geminUp исчерпаны во время переключения. Пожалуйста, обновите сессии или проверьте статус пула.';
+          return sendCloudCodeError(429, msg);
         }
         return await forwardToGoogleCloudCode(req, res, rawBuf);
       }
     }
   }
 
-  return sendError(res, 502, 'Failed to complete Cloud Code generation after exhausting failover pool.', 'upstream_error');
+  return sendCloudCodeError(
+    502,
+    'Не удалось выполнить генерацию ответа после опроса всех аккаунтов в пуле Ultra-Quota. Защита Fail-Closed активна.'
+  );
 }
 
 const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => {

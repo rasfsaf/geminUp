@@ -1143,7 +1143,7 @@ function Set-SonnetRedirectState {
         redirectFlashToPool = $currentFlash
         passVisionToCloudCode = $currentVision
         targetModel = 'claude-sonnet-4-6'
-        failClosed = $false
+        failClosed = $true
         updatedAt = (Get-Date).ToString('o')
     }
     $json = ConvertTo-Json -InputObject $obj -Compress
@@ -1161,7 +1161,7 @@ function Set-FlashRedirectState {
         redirectFlashToPool = $Enabled
         passVisionToCloudCode = $currentVision
         targetModel = 'claude-sonnet-4-6'
-        failClosed = $false
+        failClosed = $true
         updatedAt = (Get-Date).ToString('o')
     }
     $json = ConvertTo-Json -InputObject $obj -Compress
@@ -1179,7 +1179,7 @@ function Set-VisionRedirectState {
         redirectFlashToPool = $currentFlash
         passVisionToCloudCode = $Enabled
         targetModel = 'claude-sonnet-4-6'
-        failClosed = $false
+        failClosed = $true
         updatedAt = (Get-Date).ToString('o')
     }
     $json = ConvertTo-Json -InputObject $obj -Compress
