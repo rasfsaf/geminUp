@@ -1064,56 +1064,95 @@ function getRedirectConfig() {
 }
 
 // Transparent upstream proxy to real Google Cloud Code endpoint for metadata & handshake
-async function forwardToGoogleCloudCode(req, res, reqBuffer, timeoutMs = 300000) {
-  return new Promise((resolve) => {
-    const upstreamUrl = new URL(req.url, 'https://daily-cloudcode-pa.googleapis.com');
-    const headers = { ...req.headers };
-    delete headers.host;
-    headers['host'] = 'daily-cloudcode-pa.googleapis.com';
-    if (reqBuffer && reqBuffer.length > 0) {
-      headers['content-length'] = String(reqBuffer.length);
-    } else {
-      delete headers['content-length'];
-    }
+async function forwardToGoogleCloudCode(req, res, reqBuffer, timeoutMs = 300000, maxRetries = 2) {
+  let attempt = 0;
 
-    const options = {
-      hostname: 'daily-cloudcode-pa.googleapis.com',
-      port: 443,
-      path: upstreamUrl.pathname + upstreamUrl.search,
-      method: req.method,
-      headers,
-      agent: httpAgent || directHttpsAgent,
-      timeout: timeoutMs,
-    };
+  const tryForward = () => {
+    return new Promise((resolve) => {
+      attempt++;
+      const upstreamUrl = new URL(req.url, 'https://daily-cloudcode-pa.googleapis.com');
+      const headers = { ...req.headers };
 
-    const upstreamReq = https.request(options, (upstreamRes) => {
-      res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
-      upstreamRes.pipe(res);
-      upstreamRes.on('end', resolve);
-    });
+      // Clean conflicting or hop-by-hop headers
+      delete headers.host;
+      delete headers['transfer-encoding']; // CRITICAL: prevent sending both chunked and content-length to upstream
+      delete headers['connection'];
+      delete headers['keep-alive'];
+      headers['host'] = 'daily-cloudcode-pa.googleapis.com';
+      headers['connection'] = 'close';
 
-    upstreamReq.on('timeout', () => {
-      console.warn(`[JIGIT Gateway] Upstream Cloud Code request timed out after ${timeoutMs}ms: ${req.url}`);
-      upstreamReq.destroy();
-    });
-
-    req.on('close', () => {
-      upstreamReq.destroy();
-    });
-
-    upstreamReq.on('error', (err) => {
-      console.error(`[JIGIT Gateway] Upstream Cloud Code proxy error: ${err.message}`);
-      if (!res.headersSent) {
-        sendError(res, 502, `Cloud Code upstream error: ${err.message}`);
+      if (reqBuffer && reqBuffer.length > 0) {
+        headers['content-length'] = String(Buffer.byteLength(reqBuffer));
+      } else {
+        delete headers['content-length'];
       }
-      resolve();
-    });
 
-    if (reqBuffer && reqBuffer.length > 0) {
-      upstreamReq.write(reqBuffer);
-    }
-    upstreamReq.end();
-  });
+      const options = {
+        hostname: 'daily-cloudcode-pa.googleapis.com',
+        port: 443,
+        path: upstreamUrl.pathname + upstreamUrl.search,
+        method: req.method,
+        headers,
+        agent: httpAgent || directHttpsAgent,
+        timeout: timeoutMs,
+      };
+
+      let aborted = false;
+      const upstreamReq = https.request(options, (upstreamRes) => {
+        const resHeaders = { ...upstreamRes.headers };
+        delete resHeaders['connection'];
+        delete resHeaders['keep-alive'];
+        delete resHeaders['transfer-encoding'];
+        res.writeHead(upstreamRes.statusCode, resHeaders);
+        upstreamRes.pipe(res);
+        upstreamRes.on('end', () => resolve(true));
+      });
+
+      upstreamReq.on('timeout', () => {
+        console.warn(`[JIGIT Gateway] Upstream Cloud Code request timed out after ${timeoutMs}ms (attempt ${attempt}): ${req.url}`);
+        upstreamReq.destroy();
+      });
+
+      // ONLY destroy upstream if the client response is aborted before completion
+      const onClientClose = () => {
+        if (!res.writableEnded) {
+          aborted = true;
+          upstreamReq.destroy();
+        }
+      };
+      res.once('close', onClientClose);
+
+      upstreamReq.on('error', async (err) => {
+        console.error(`[JIGIT Gateway] Upstream Cloud Code error (attempt ${attempt}/${maxRetries + 1}): ${err.message}`);
+
+        if (aborted || res.writableEnded || res.headersSent) {
+          resolve(false);
+          return;
+        }
+
+        // Retry transient socket errors (socket hang up, ECONNRESET, bad record mac)
+        if (attempt <= maxRetries) {
+          console.warn(`[JIGIT Gateway] Retrying upstream request to Cloud Code in 300ms (attempt ${attempt + 1})...`);
+          await new Promise((r) => setTimeout(r, 300));
+          const retryOk = await tryForward();
+          resolve(retryOk);
+          return;
+        }
+
+        if (!res.headersSent) {
+          sendError(res, 502, `Cloud Code upstream error: ${err.message}`);
+        }
+        resolve(false);
+      });
+
+      if (reqBuffer && reqBuffer.length > 0) {
+        upstreamReq.write(reqBuffer);
+      }
+      upstreamReq.end();
+    });
+  };
+
+  return await tryForward();
 }
 
 // Forward user quota from Google Cloud Code transparently

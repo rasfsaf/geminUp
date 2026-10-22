@@ -66,10 +66,7 @@ function createSocks5Connection(proxyHost, proxyPort, targetHost, targetPort, ti
 function createAgent(proxyUrl) {
   if (!proxyUrl) {
     return new https.Agent({
-      keepAlive: true,
-      keepAliveMsecs: 60000,
-      maxSockets: 100,
-      maxFreeSockets: 20,
+      keepAlive: false,
       timeout: 300000,
     });
   }
@@ -80,10 +77,7 @@ function createAgent(proxyUrl) {
     const proxyPort = Number(parsed.port) || 1080;
 
     return new https.Agent({
-      keepAlive: true,
-      keepAliveMsecs: 60000,
-      maxSockets: 100,
-      maxFreeSockets: 20,
+      keepAlive: false,
       timeout: 300000,
       createConnection(options, callback) {
         createSocks5Connection(proxyHost, proxyPort, options.host, Number(options.port) || 443)
@@ -93,8 +87,15 @@ function createAgent(proxyUrl) {
               servername: options.servername || options.host,
             });
             tlsSocket.setNoDelay(true);
-            tlsSocket.once('error', (err) => callback(err));
-            tlsSocket.once('secureConnect', () => callback(null, tlsSocket));
+            const onError = (err) => {
+              rawSocket.destroy();
+              callback(err);
+            };
+            tlsSocket.once('error', onError);
+            tlsSocket.once('secureConnect', () => {
+              tlsSocket.removeListener('error', onError);
+              callback(null, tlsSocket);
+            });
           })
           .catch((err) => callback(err));
       },
@@ -103,19 +104,13 @@ function createAgent(proxyUrl) {
 
   // Fallback for standard HTTP proxy
   return new https.Agent({
-    keepAlive: true,
-    keepAliveMsecs: 60000,
-    maxSockets: 100,
-    maxFreeSockets: 20,
+    keepAlive: false,
     timeout: 300000,
   });
 }
 
 const directHttpsAgent = new https.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 60000,
-  maxSockets: 100,
-  maxFreeSockets: 20,
+  keepAlive: false,
   timeout: 300000,
 });
 
