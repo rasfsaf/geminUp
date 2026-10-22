@@ -77,7 +77,12 @@ const keepAliveManager = new KeepAliveManager(pool);
 const KNOWN_UPSTREAM_MODELS = {
   'gemini-4-argon': '95a4c0abcba24364',
   'gemini-4-argon-thinking-medium': '95a4c0abcba24364',
+  'gemini-4-argon-thinking-high': '95a4c0abcba24364',
+  'gemini-4-argon-thinking-low': '95a4c0abcba24364',
   'gemini-3.8-flash': '56fdd199312815e2',
+  'gemini-3.8-flash-high': '56fdd199312815e2',
+  'gemini-3.8-flash-medium': '56fdd199312815e2',
+  'gemini-3.8-flash-low': '56fdd199312815e2',
   'gemini-3.8-flash-thinking': '56fdd199312815e2',
   'gemini-3.1-pro': 'e6fa609c3fa255c0',
   'gemini-3.1-pro-advanced': 'e6fa609c3fa255c0',
@@ -91,7 +96,11 @@ const KNOWN_UPSTREAM_MODELS = {
 const SUPPORTED_MODELS = [
   { id: 'gemini-4-argon', object: 'model', owned_by: 'google', permission: [] },
   { id: 'gemini-4-argon-thinking-medium', object: 'model', owned_by: 'google', permission: [] },
+  { id: 'gemini-4-argon-thinking-high', object: 'model', owned_by: 'google', permission: [] },
   { id: 'gemini-3.8-flash', object: 'model', owned_by: 'google', permission: [] },
+  { id: 'gemini-3.8-flash-high', object: 'model', owned_by: 'google', permission: [] },
+  { id: 'gemini-3.8-flash-medium', object: 'model', owned_by: 'google', permission: [] },
+  { id: 'gemini-3.8-flash-low', object: 'model', owned_by: 'google', permission: [] },
   { id: 'gemini-3.8-flash-thinking', object: 'model', owned_by: 'google', permission: [] },
   { id: 'gemini-3.1-pro', object: 'model', owned_by: 'google', permission: [] },
   { id: 'gemini-3.1-pro-advanced', object: 'model', owned_by: 'google', permission: [] },
@@ -132,6 +141,22 @@ const CLOUD_CODE_CATALOG = {
       tagTitle: '',
       disabled: false,
     },
+    'gemini-3.8-flash-medium': {
+      displayName: 'Gemini 3.8 Flash (Thinking Medium)',
+      description: 'Balanced latency coding model with Ultra-Quota pool',
+      tagTitle: '',
+      disabled: false,
+      supportsRawThinking: true,
+      supportsAdaptiveThinking: true,
+    },
+    'gemini-3.8-flash-high': {
+      displayName: 'Gemini 3.8 Flash (Thinking High)',
+      description: 'Extended depth reasoning Flash model with Ultra-Quota pool',
+      tagTitle: '',
+      disabled: false,
+      supportsRawThinking: true,
+      supportsAdaptiveThinking: true,
+    },
     'gemini-3.1-pro': {
       displayName: 'Gemini 3.1 Pro (Argon Engine)',
       description: 'Advanced architecture model',
@@ -162,6 +187,8 @@ const CLOUD_CODE_CATALOG = {
             'gemini-4-argon',
             'gemini-4-argon-thinking-medium',
             'gemini-3.8-flash',
+            'gemini-3.8-flash-medium',
+            'gemini-3.8-flash-high',
             'gemini-3.1-pro',
             'claude-sonnet-4-6',
             'claude-sonnet-4',
@@ -1223,9 +1250,44 @@ async function forwardAvailableModels(req, res, reqBuffer) {
               supportsVideo: true,
             };
 
-            // Uncap Claude Sonnet models so Antigravity UI never flags individual baseline quota exhaustion
+            json.models['gemini-3.8-flash-medium'] = {
+              displayName: 'Gemini 3.8 Flash (Thinking Medium)',
+              description: 'Balanced latency coding model with Ultra-Quota pool',
+              supportsImages: true,
+              supportsThinking: true,
+              recommended: false,
+              maxTokens: 1048576,
+              maxOutputTokens: 65535,
+              quotaInfo: {
+                remainingFraction: 1.0,
+                resetTime: '2099-01-01T00:00:00Z',
+              },
+              model: 'MODEL_PLACEHOLDER_M198',
+              apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
+              modelProvider: 'MODEL_PROVIDER_GOOGLE',
+              supportsVideo: true,
+            };
+            json.models['gemini-3.8-flash-high'] = {
+              displayName: 'Gemini 3.8 Flash (Thinking High)',
+              description: 'Extended depth reasoning Flash model with Ultra-Quota pool',
+              supportsImages: true,
+              supportsThinking: true,
+              recommended: false,
+              maxTokens: 1048576,
+              maxOutputTokens: 65535,
+              quotaInfo: {
+                remainingFraction: 1.0,
+                resetTime: '2099-01-01T00:00:00Z',
+              },
+              model: 'MODEL_PLACEHOLDER_M198',
+              apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
+              modelProvider: 'MODEL_PROVIDER_GOOGLE',
+              supportsVideo: true,
+            };
+
+            // Uncap Claude Sonnet, Argon, and Flash models so Antigravity UI never flags individual baseline quota exhaustion
             for (const key of Object.keys(json.models)) {
-              if (key.includes('sonnet') || key.includes('claude') || key.includes('opus')) {
+              if (key.includes('sonnet') || key.includes('claude') || key.includes('opus') || key.includes('argon') || key.includes('flash')) {
                 const m = json.models[key];
                 if (m && typeof m === 'object') {
                   m.quotaInfo = {
@@ -1325,10 +1387,16 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
   const humanModelName = isSonnet
     ? 'Claude Sonnet 4.6 (Argon Route)'
     : isFlash
-      ? (effectiveModel.includes('lite') ? 'Gemini 3.5 Flash-Lite' : 'Gemini 3.8 Flash')
+      ? (effectiveModel.includes('lite') ? 'Gemini 3.5 Flash-Lite'
+        : effectiveModel.includes('medium') ? 'Gemini 3.8 Flash (Thinking Medium)'
+        : effectiveModel.includes('high') ? 'Gemini 3.8 Flash (Thinking High)'
+        : effectiveModel.includes('low') ? 'Gemini 3.8 Flash (Thinking Low)'
+        : 'Gemini 3.8 Flash')
       : isPro
         ? 'Gemini 3.1 Pro'
-        : 'Gemini 4 Argon';
+        : (effectiveModel.includes('medium') ? 'Gemini 4 Argon (Thinking Medium)'
+          : effectiveModel.includes('high') ? 'Gemini 4 Argon (Thinking High)'
+          : 'Gemini 4 Argon');
 
   // Intercept Argon, Sonnet (always mapped to Argon Ultra-Quota), Flash, and Pro models to serve via Ultra-Quota pool with JIGIT Engine compression
   const isTargeted = isArgon || isSonnet || isFlash || isPro;
