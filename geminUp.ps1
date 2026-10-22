@@ -10,7 +10,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TransportVersion = '2.0.3'
+$script:TransportVersion = '2.0.4'
 $script:TaskName = 'geminUp'
 $script:WatchdogTaskName = 'geminUp Watchdog'
 $script:ListenPort = 8877
@@ -2754,7 +2754,7 @@ function Test-JewishTokenizer {
         Write-Host "Latency:       $($sw.ElapsedMilliseconds) ms" -ForegroundColor Cyan
 
         $capsuleDir = Join-Path $script:ArgonDir 'capsules'
-        $capsuleCount = if (Test-Path -LiteralPath $capsuleDir) { @(Get-ChildItem -LiteralPath $capsuleDir -Filter '*.json' -ErrorAction SilentlyContinue).Count } else { 0 }
+        $capsuleCount = if (Test-Path -LiteralPath $capsuleDir) { @(Get-ChildItem -LiteralPath $capsuleDir -Filter '*.json' -Recurse -File -ErrorAction SilentlyContinue).Count } else { 0 }
         Write-Host "Memory:        $capsuleCount capsule(s) stored on disk" -ForegroundColor Cyan
         Write-Host '-----------------------------------' -ForegroundColor Green
 
@@ -2807,7 +2807,7 @@ function Show-JewishTokenizerMenu {
         $routingColor = if ($isRouted) { 'Green' } else { 'DarkGray' }
 
         $capsuleDir = Join-Path $script:ArgonDir 'capsules'
-        $capsuleCount = if (Test-Path -LiteralPath $capsuleDir) { @(Get-ChildItem -LiteralPath $capsuleDir -Filter '*.json' -ErrorAction SilentlyContinue).Count } else { 0 }
+        $capsuleCount = if (Test-Path -LiteralPath $capsuleDir) { @(Get-ChildItem -LiteralPath $capsuleDir -Filter '*.json' -Recurse -File -ErrorAction SilentlyContinue).Count } else { 0 }
         $transportRoute = if (Test-TransportListener -TimeoutMilliseconds 250) { "SOCKS5 (127.0.0.1:$script:ListenPort)" } else { 'Direct' }
 
         Write-Host '==================================================' -ForegroundColor Cyan

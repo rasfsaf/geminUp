@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [2.0.4] - 2026-10-23
+
+### RU (Русский)
+
+#### Исправления и улучшения CLI
+- **Рекурсивный подсчёт капсул памяти JIGIT в CLI:** Исправлен счётчик сохранённых капсул в интерактивном меню Еврейского токенизатора (Show-JewishTokenizerMenu) и диагностическом тесте (Test-JewishTokenizer). Теперь файлы *.json опрашиваются рекурсивно по всем подпапкам сессий (-Recurse -File), отображая реальное количество активных капсул на диске в реальном времени.
+
+### EN (English)
+
+#### CLI Improvements and Fixes
+- **Recursive JIGIT Memory Capsule Counter in CLI:** Fixed the stored memory capsule count displayed in the Jewish Tokenizer CLI menu (Show-JewishTokenizerMenu) and health test (Test-JewishTokenizer). The file scan now recursively includes conversation subdirectories (-Recurse -File), reflecting the true real-time count of active capsules stored on disk.
+
+---
+
 ## [2.0.3] - 2026-10-22
 
 ### RU (Русский)
