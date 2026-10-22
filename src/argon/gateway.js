@@ -529,9 +529,10 @@ function extractPromptFromAnyPayload(bodyJson) {
     }
   }
 
-  // Extract Messages (OpenAI format)
+  // Extract Messages (OpenAI format) with JIGIT Engine optimization
   if (Array.isArray(messages) && messages.length > 0) {
-    for (const m of messages) {
+    const optimizedMessages = optimizeConversationTurns(messages);
+    for (const m of optimizedMessages) {
       if (!m) continue;
       const role = String(m.role || 'user').toUpperCase();
       if (m.tool_calls && Array.isArray(m.tool_calls)) {

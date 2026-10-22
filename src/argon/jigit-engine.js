@@ -77,6 +77,41 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial) {
     }
     return turn;
   }
+
+  // Handle plain text property
+  if (typeof turn.text === 'string' && !turn.parts && !turn.content) {
+    if (!isRecent && !isInitial && turn.text.length > 2500) {
+      return { ...turn, text: compactNoiseText(turn.text, 'Historical Message') };
+    }
+    return turn;
+  }
+
+  // Handle string content property (OpenAI format)
+  if (typeof turn.content === 'string' && !turn.parts) {
+    if (!isRecent && !isInitial && turn.content.length > 2500) {
+      return { ...turn, content: compactNoiseText(turn.content, 'Historical Message') };
+    }
+    return turn;
+  }
+
+  // Handle array content property (Anthropic format: tool_result / text blocks)
+  if (Array.isArray(turn.content) && !turn.parts) {
+    const optimizedContent = turn.content.map((part) => {
+      if (!part || typeof part !== 'object') return part;
+      if (part.type === 'tool_result' || part.type === 'tool_call_output') {
+        const textVal = typeof part.content === 'string' ? part.content : (typeof part.output === 'string' ? part.output : '');
+        if (textVal.length > (isRecent ? 4000 : 1500)) {
+          const compacted = compactNoiseText(textVal, 'Tool Result');
+          return { ...part, content: compacted };
+        }
+      } else if (typeof part.text === 'string' && !isRecent && !isInitial && part.text.length > 2500) {
+        return { ...part, text: compactNoiseText(part.text, 'Historical Part') };
+      }
+      return part;
+    });
+    return { ...turn, content: optimizedContent };
+  }
+
   if (!Array.isArray(turn.parts)) return turn;
 
   const optimizedParts = turn.parts.map((part) => {
