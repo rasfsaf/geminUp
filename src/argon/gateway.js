@@ -28,6 +28,23 @@ const {
   runJigitPipeline,
   enforceJigitBudget,
 } = require('./jigit-engine');
+const { ensureMcpRegistered } = require('./mcp-registration');
+
+const ANTIGRAVITY_IDE_SYSTEM_PROMPT = `# Role & Environment: Antigravity IDE Autonomous Pair Programmer
+You are Antigravity, an expert Principal Software Engineer and autonomous coding assistant operating directly inside the Google Antigravity IDE workspace.
+You have direct, real-time access to the user's local operating system, active project workspace, terminal, and filesystem through integrated workspace tools.
+
+CORE ENVIRONMENT AWARENESS:
+1. Environment: You are NOT a remote chatbot answering theoretical questions. You are pair programming with the user inside their IDE.
+2. Direct Action Over Conversation: Never tell the user "run this command", "create this file", "open your terminal", or "here is the script to save". Instead, IMMEDIATELY call the provided workspace tools to perform the work yourself.
+3. Proactive Execution:
+   - When asked to inspect, debug, or write code, call 'read_file', 'edit_file', or 'write_file'.
+   - When asked to check git status, test scripts, or run background processes, call 'run_command'.
+4. JIGIT Context Compression & Memory Restoration:
+   - When historical turns, long logs, or huge files are compressed by the JIGIT engine, they appear as \`[JIGIT Engine: ... capsule=jigit-xxxxx]\`.
+   - If you need full, untruncated original content, invoke the 'jigit-memory' MCP tool: \`jigit_restore_capsule\` with \`capsule_id\`.
+5. Tool Calling Syntax:
+   Whenever an action is needed, output a \`\`\`tool_call block immediately so the IDE runtime executes it without delay.`;
 
 // Parse CLI flags
 function parseArgs() {
@@ -229,18 +246,8 @@ function buildToolInstructionPrompt(tools) {
       : {};
 
   return `# Workspace Environment & Tools
-# Role & Environment: Antigravity IDE Autonomous Pair Programmer
-You are Antigravity, an expert Principal Software Engineer and autonomous coding assistant operating directly inside the Google Antigravity IDE workspace.
-You have direct, real-time access to the user's local operating system, active project workspace, terminal, and filesystem through integrated workspace tools.
-
-CORE ENVIRONMENT AWARENESS:
-1. Environment: You are NOT a remote chatbot answering theoretical questions. You are pair programming with the user inside their IDE.
-2. Direct Action Over Conversation: Never tell the user "run this command", "create this file", "open your terminal", or "here is the script to save". Instead, IMMEDIATELY call the provided workspace tools to perform the work yourself.
-3. Proactive Execution:
-   - When asked to inspect, debug, or write code, call 'read_file', 'edit_file', or 'write_file'.
-   - When asked to check git status, test scripts, or run background processes, call 'run_command'.
-4. Tool Calling Syntax:
-   Whenever an action is needed, output a \`\`\`tool_call block as demonstrated below:
+Tool Calling Syntax:
+Whenever an action is needed, output a \`\`\`tool_call block as demonstrated below:
 \`\`\`tool_call
 ${JSON.stringify({ name: sampleTool.name, args: sampleArgs }, null, 2)}
 \`\`\`
@@ -462,6 +469,7 @@ function extractToolCallsFromOutput(text) {
 
 function formatCloudCodeContentsToPrompt(contents, systemInstruction) {
   const parts = [];
+  parts.push(ANTIGRAVITY_IDE_SYSTEM_PROMPT);
   if (systemInstruction && Array.isArray(systemInstruction.parts)) {
     const sysTexts = systemInstruction.parts.map((p) => (typeof p === 'string' ? p : p.text || '')).filter(Boolean);
     if (sysTexts.length) parts.push(`# Instructions\n${sysTexts.join('\n')}`);
@@ -1781,6 +1789,18 @@ const server = http.createServer({ maxHeaderSize: 131072 }, async (req, res) => 
 });
 
 if (require.main === module) {
+  // Ensure Antigravity MCP memory registration (checks and registers once on startup)
+  try {
+    const mcpStatus = ensureMcpRegistered();
+    if (mcpStatus.registered) {
+      console.info(`[Argon Gateway] MCP Integration: ${mcpStatus.reason}`);
+    } else {
+      console.info(`[Argon Gateway] MCP Integration: Active and healthy (${mcpStatus.reason})`);
+    }
+  } catch (err) {
+    console.warn(`[Argon Gateway] MCP Integration notice: ${err.message}`);
+  }
+
   keepAliveManager.start();
   server.listen(config.port, config.host, () => {
     console.info(`[Argon Gateway] Listening on http://${config.host}:${config.port}/v1 (Proxy: ${config.proxy || 'direct'})`);
@@ -1792,6 +1812,9 @@ module.exports = {
   extractToolsFromPayload,
   buildToolInstructionPrompt,
   extractToolCallsFromOutput,
+  extractPromptFromAnyPayload,
+  formatCloudCodeContentsToPrompt,
+  ANTIGRAVITY_IDE_SYSTEM_PROMPT,
   server,
   pool,
 };

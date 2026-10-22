@@ -4,6 +4,7 @@
  */
 
 const crypto = require('crypto');
+const { saveCapsule } = require('./capsule-store');
 
 function getDeterministicCapsuleId(content) {
   const hash = crypto.createHash('sha256').update(String(content || '')).digest('hex').slice(0, 10);
@@ -47,21 +48,23 @@ function isNoiseContent(text) {
 }
 
 function compactFileBlock(filepath, content, capsuleId) {
+  saveCapsule(capsuleId, content, { category: 'File', filepath });
   const lines = content.split('\n');
   const preview = lines.slice(0, 4).join('\n').slice(0, 250);
   const tail = lines.slice(-2).join('\n').slice(0, 150);
   const totalLength = content.length;
   const label = filepath ? `File: ${filepath}` : 'File/Code Dump';
-  return `[JIGIT Engine: Compacted ${label} (${totalLength} bytes; capsule=${capsuleId}). Preview:\n${preview}\n... [${totalLength - preview.length - tail.length} bytes omitted for low latency] ...\n${tail}]`;
+  return `[JIGIT Engine: Compacted ${label} (${totalLength} bytes; capsule=${capsuleId}). Use MCP tool jigit_restore_capsule('${capsuleId}') to inspect full original content. Preview:\n${preview}\n... [${totalLength - preview.length - tail.length} bytes omitted for low latency] ...\n${tail}]`;
 }
 
 function compactNoiseText(text, category = 'Diagnostic Log') {
   if (text.length <= 1200) return text;
+  const capsuleId = getDeterministicCapsuleId(text);
+  saveCapsule(capsuleId, text, { category });
   const head = text.slice(0, 500);
   const tail = text.slice(-400);
   const omitted = text.length - 900;
-  const capsuleId = getDeterministicCapsuleId(text);
-  return `${head}\n\n[JIGIT Engine: ${category} truncated (${omitted} chars omitted; capsule=${capsuleId})]\n\n${tail}`;
+  return `${head}\n\n[JIGIT Engine: ${category} truncated (${omitted} chars omitted; capsule=${capsuleId}). Use MCP tool jigit_restore_capsule('${capsuleId}') if full details are needed.]\n\n${tail}`;
 }
 
 function isErrorOrFailure(text) {
