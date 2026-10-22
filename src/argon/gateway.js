@@ -1386,12 +1386,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         await pool.refreshAccountSession(account);
       }
 
-      let upstreamId = resolveModelUpstream(bodyJson.model, account);
-      if (attempts > 2 && (lastStreamError?.upstreamCode === 1155 || streamedContentLength === 0)) {
-        // When Argon/Pro experiences persistent Google burst overload (1155), transparently serve turn via Gemini Flash
-        upstreamId = '56fdd199312815e2';
-        console.info(`[Argon Gateway] Argon overloaded upstream (1155) -> seamlessly serving turn via Gemini Flash (${upstreamId})`);
-      }
+      const upstreamId = resolveModelUpstream(bodyJson.model, account);
       const capacity = account.modelCapacity || 1;
       const capacityField = account.modelCapacityField || 12;
       const modelHeader = buildModelHeader(upstreamId, capacity, capacityField);
@@ -1674,8 +1669,12 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
           let fallbackText = '';
           if (cleanText && cleanText.trim().length > 0) {
             fallbackText = cleanText.trim();
+          } else if (lastStreamError?.upstreamCode === 1155) {
+            fallbackText = '⚠️ [Argon Gateway] Upstream Google Gemini 4 Argon model is temporarily overloaded (Error 1155). Please retry your request in a few moments.';
+          } else if (lastStreamError?.message) {
+            fallbackText = `⚠️ [Argon Gateway] Upstream generation failed: ${lastStreamError.message}. Please retry your request.`;
           } else {
-            fallbackText = '[Argon Gateway: Upstream Gemini model completed without generating output text.]';
+            fallbackText = '⚠️ [Argon Gateway] Upstream Google Gemini 4 Argon model completed without generating output text. Please retry your request.';
           }
           const textChunk = {
             response: {
@@ -1786,7 +1785,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 
   return sendCloudCodeError(
     502,
-    `Не удалось получить ответ от Ultra-Quota пула (${lastAttemptError || 'unknown'}). Режим Fail-Closed активен.`
+    `[Argon Gateway] Upstream Google Gemini 4 Argon pool request failed (${lastAttemptError || 'Upstream temporarily unavailable'}). Please retry your request.`
   );
 }
 
