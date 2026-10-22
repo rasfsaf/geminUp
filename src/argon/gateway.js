@@ -735,13 +735,14 @@ async function handleChatCompletions(req, res, bodyJson) {
         });
 
         let accumulatedContent = '';
-        let streamRemainder = '';
+        let streamRemainderBuf = Buffer.alloc(0);
         let streamedLength = 0;
 
         upstreamRes.body.on('data', (chunk) => {
-          streamRemainder += chunk.toString('utf8');
-          const { frames, remainder } = parseGoogleFrames(streamRemainder);
-          streamRemainder = remainder;
+          const chunkBuf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          streamRemainderBuf = Buffer.concat([streamRemainderBuf, chunkBuf]);
+          const { frames, remainder } = parseGoogleFrames(streamRemainderBuf);
+          streamRemainderBuf = remainder;
 
           if (frames.length > 0) {
             try {
@@ -1313,16 +1314,17 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
       if (isStream) {
         ensureSseHeaders();
 
-        let streamRemainder = '';
+        let streamRemainderBuf = Buffer.alloc(0);
         let streamError = null;
         let streamFinishedCleanly = false;
 
         const streamResult = await new Promise((resolve) => {
           upstreamRes.body.on('data', (chunk) => {
             if (clientAborted || res.writableEnded || res.destroyed) return;
-            streamRemainder += chunk.toString('utf8');
-            const { frames, remainder } = parseGoogleFrames(streamRemainder);
-            streamRemainder = remainder;
+            const chunkBuf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            streamRemainderBuf = Buffer.concat([streamRemainderBuf, chunkBuf]);
+            const { frames, remainder } = parseGoogleFrames(streamRemainderBuf);
+            streamRemainderBuf = remainder;
 
             if (frames.length > 0) {
               try {

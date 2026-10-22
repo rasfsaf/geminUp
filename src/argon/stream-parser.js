@@ -24,38 +24,73 @@ function createStreamError(code) {
   return error;
 }
 
+/**
+ * Parses Google chunked wire format from Buffer or string.
+ * CRITICAL: Google upstream wire format transmits byte-length markers, NOT character length.
+ * Parsing in byte domain prevents multibyte UTF-8 characters (Russian, CJK, emoji) from truncating or crashing frames.
+ */
 function parseGoogleFrames(input) {
-  let buffer = String(input || '');
-  if (buffer.startsWith(XSSI_PREFIX)) buffer = buffer.slice(XSSI_PREFIX.length).trimStart();
+  let buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input || ''), 'utf8');
+
+  // Strip XSSI prefix
+  const xssiBytes = Buffer.from(XSSI_PREFIX);
+  if (buf.length >= xssiBytes.length && buf.subarray(0, xssiBytes.length).equals(xssiBytes)) {
+    buf = buf.subarray(xssiBytes.length);
+  }
+
   const frames = [];
-  let position = 0;
-  while (position < buffer.length) {
-    while (/\s/.test(buffer[position] || '')) position += 1;
-    if (position >= buffer.length) break;
-    const marker = /^(\d+)/.exec(buffer.slice(position));
-    if (!marker) {
+  let pos = 0;
+
+  while (pos < buf.length) {
+    // Skip whitespace (spaces, newlines, carriage returns, tabs)
+    while (pos < buf.length && (buf[pos] === 32 || buf[pos] === 10 || buf[pos] === 13 || buf[pos] === 9)) {
+      pos++;
+    }
+    if (pos >= buf.length) break;
+
+    // Read ASCII digit length marker
+    let digitEnd = pos;
+    while (digitEnd < buf.length && buf[digitEnd] >= 48 && buf[digitEnd] <= 57) {
+      digitEnd++;
+    }
+    if (digitEnd === pos) {
       break;
     }
-    const length = Number(marker[1]);
-    const start = position + marker[1].length;
+
+    const length = parseInt(buf.subarray(pos, digitEnd).toString('ascii'), 10);
+    // In Google wire format, the length marker is followed by optional whitespace / newline delimiter before payload
+    let start = digitEnd;
+    while (start < buf.length && (buf[start] === 32 || buf[start] === 10 || buf[start] === 13 || buf[start] === 9)) {
+      start++;
+    }
     const end = start + length;
-    if (end > buffer.length) {
-      // Incomplete frame, wait for next network packet
+
+    if (end > buf.length) {
+      // Incomplete frame, wait for next network chunk
       break;
     }
-    const raw = buffer.slice(start, end).trim();
-    position = end;
-    if (!raw) continue;
-    let parsed;
+
+    const frameBuf = buf.subarray(start, end);
+    pos = end;
+
+    const rawStr = frameBuf.toString('utf8').trim();
+    if (!rawStr) continue;
+
     try {
-      parsed = JSON.parse(raw);
+      const parsed = JSON.parse(rawStr);
+      frames.push(parsed);
     } catch {
       continue;
     }
-    if (Array.isArray(parsed)) frames.push(...parsed);
-    else frames.push(parsed);
   }
-  return { frames, remainder: buffer.slice(position) };
+
+  const remainderBuf = buf.subarray(pos);
+  return {
+    frames,
+    remainder: remainderBuf,
+    // Provide string representation for backward compatibility
+    remainderStr: remainderBuf.toString('utf8'),
+  };
 }
 
 function parseGeminiStream(frames) {
