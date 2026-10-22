@@ -23,6 +23,10 @@ const {
   parseGoogleFrames,
   parseGeminiStream,
 } = require('./stream-parser');
+const {
+  runJigitPipeline,
+  enforceJigitBudget,
+} = require('./jigit-engine');
 
 // Parse CLI flags
 function parseArgs() {
@@ -309,88 +313,14 @@ Instruction: The user has attached an image or screenshot saved at '${posixPath}
 }
 
 function optimizeConversationTurns(turnsList, maxTurnToolResultChars = 1200, keepFullRecentTurns = 4, maxTotalPromptTurns = 8) {
-  if (!Array.isArray(turnsList) || turnsList.length === 0) return [];
-  const totalTurns = turnsList.length;
-
-  let selectedTurns = turnsList;
-  if (totalTurns > maxTotalPromptTurns) {
-    // Keep initial 1 turn (the original user goal/task statement)
-    const initialTurns = turnsList.slice(0, 1);
-    // Keep the most recent turns
-    const recentTurns = turnsList.slice(-keepFullRecentTurns);
-    const omittedCount = totalTurns - initialTurns.length - recentTurns.length;
-
-    const summaryMarker = {
-      role: 'user',
-      parts: [
-        {
-          text: `[Context Note: ${omittedCount} intermediate conversation turns omitted for performance and low latency. Most recent state and initial request preserved below.]`,
-        },
-      ],
-    };
-    selectedTurns = [...initialTurns, summaryMarker, ...recentTurns];
-  }
-
-  const selTotal = selectedTurns.length;
-  return selectedTurns.map((turn, index) => {
-    if (!turn) return turn;
-    const isRecent = index >= selTotal - 2; // only the last 2 turns are completely unconstrained
-    if (typeof turn === 'string') {
-      if (!isRecent && turn.length > 2000) {
-        return turn.slice(0, 1000) + '\n\n[... Truncated for latency ...]\n\n' + turn.slice(-500);
-      }
-      return turn;
-    }
-    if (!Array.isArray(turn.parts)) return turn;
-
-    const condensedParts = turn.parts.map((part) => {
-      if (!part) return part;
-      // Truncate functionResponse output
-      if (part.functionResponse) {
-        const fr = part.functionResponse;
-        const resp = fr.response;
-        const charLimit = isRecent ? 2500 : maxTurnToolResultChars;
-        if (resp && typeof resp.output === 'string' && resp.output.length > charLimit) {
-          const head = resp.output.slice(0, Math.round(charLimit * 0.6));
-          const tail = resp.output.slice(-Math.round(charLimit * 0.4));
-          const omitted = resp.output.length - (head.length + tail.length);
-          return {
-            ...part,
-            functionResponse: {
-              ...fr,
-              response: {
-                ...resp,
-                output: `${head}\n\n[... Older tool output truncated: ${omitted} chars omitted for latency ...]\n\n${tail}`,
-              },
-            },
-          };
-        }
-      }
-      // Truncate very long older text parts
-      if (!isRecent && typeof part.text === 'string' && part.text.length > 2000) {
-        const head = part.text.slice(0, 1000);
-        const tail = part.text.slice(-500);
-        const omitted = part.text.length - 1500;
-        return {
-          ...part,
-          text: `${head}\n\n[... Older message truncated: ${omitted} chars omitted for latency ...]\n\n${tail}`,
-        };
-      }
-      return part;
-    });
-
-    return { ...turn, parts: condensedParts };
+  return runJigitPipeline(turnsList, {
+    keepRecentTurns: keepFullRecentTurns,
+    maxPromptTurns: maxTotalPromptTurns,
   });
 }
 
-function enforcePromptBudget(promptText, maxChars = 35000) {
-  if (!promptText || promptText.length <= maxChars) return promptText;
-  const headSize = Math.round(maxChars * 0.3);
-  const tailSize = Math.round(maxChars * 0.7);
-  const head = promptText.slice(0, headSize);
-  const tail = promptText.slice(-tailSize);
-  const omitted = promptText.length - (headSize + tailSize);
-  return `${head}\n\n[... Context truncated: ${omitted} chars omitted for fast startup latency ...]\n\n${tail}`;
+function enforcePromptBudget(promptText, maxChars = 38000) {
+  return enforceJigitBudget(promptText, maxChars);
 }
 
 function payloadHasImages(bodyJson) {
@@ -739,7 +669,7 @@ async function handleChatCompletions(req, res, bodyJson) {
         },
         body: genReq.body.toString(),
         agent: httpAgent,
-        timeoutMs: 180000,
+        timeoutMs: 300000,
       });
 
       pool.absorbSetCookies(account, upstreamRes.rawCookies);
@@ -1204,7 +1134,7 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
         },
         body: genReq.body.toString(),
         agent: httpAgent,
-        timeoutMs: 180000,
+        timeoutMs: 300000,
       });
 
       pool.absorbSetCookies(account, upstreamRes.rawCookies);
