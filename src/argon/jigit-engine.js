@@ -1,18 +1,20 @@
 /**
- * JIGIT Engine - High-Precision Context Compression & Boundary Pipeline for Gemini 4 Argon
- * Adapted from Reagent context optimization architecture.
+ * JIGIT Engine - High-Precision Context Compression & Boundary Pipeline for Antigravity & Gemini
+ * Automatically compacts historical turns, tool outputs, terminal logs, and historical images.
+ * Keeps initial turn (intent) and recent turns pristine while maintaining valid Gemini schema.
  */
 
 const crypto = require('crypto');
 const { saveCapsule } = require('./capsule-store');
+const { createCompressionTracker, logCompressionSummary } = require('./jigit-logger');
 
-function getDeterministicCapsuleId(content) {
+function getDeterministicCapsuleId(content, prefix = 'jigit') {
   const hash = crypto.createHash('sha256').update(String(content || '')).digest('hex').slice(0, 10);
-  return 'jigit-' + hash;
+  return `${prefix}-${hash}`;
 }
 
 function isAgentToolResultText(text) {
-  if (typeof text !== 'string' || text.length === 0) return false;
+  if (typeof text !== 'string') return false;
   const trimmed = text.trim();
   if (/^\[[\w_.-]+\s+for\s+['"][^'"]+['"]\]\s*Result:/i.test(trimmed)) return true;
   if (/^\[(?:execute_command|read_file|write_file|edit_file|apply_diff|replace_in_file|search_files|list_files|run_command)[^\]]*\]\s*Result:/i.test(trimmed)) return true;
@@ -43,7 +45,8 @@ function isNoiseContent(text) {
     text.includes('BUILD FAILED') ||
     text.includes('FAILED (failures=') ||
     text.includes('FAILED (errors=') ||
-    isAgentToolResultText(text)
+    text.includes('PASS ') ||
+    text.includes('FAIL ')
   );
 }
 
@@ -81,9 +84,21 @@ function isErrorOrFailure(text) {
 
 function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
   if (!turn) return turn;
+  const tracker = options.tracker || null;
+
   if (typeof turn === 'string') {
     if (!isRecent && !isInitial && turn.length > 2500) {
-      return compactNoiseText(turn, 'Historical Message', options);
+      const compacted = compactNoiseText(turn, 'Historical Message', options);
+      if (tracker && compacted !== turn) {
+        tracker.recordItem({
+          type: 'Historical Message',
+          name: 'plain text',
+          originalSize: turn.length,
+          compactedSize: compacted.length,
+          capsuleId: getDeterministicCapsuleId(turn),
+        });
+      }
+      return compacted;
     }
     return turn;
   }
@@ -91,7 +106,17 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
   // Handle plain text property
   if (typeof turn.text === 'string' && !turn.parts && !turn.content) {
     if (!isRecent && !isInitial && turn.text.length > 2500) {
-      return { ...turn, text: compactNoiseText(turn.text, 'Historical Message', options) };
+      const compacted = compactNoiseText(turn.text, 'Historical Message', options);
+      if (tracker && compacted !== turn.text) {
+        tracker.recordItem({
+          type: 'Historical Message',
+          name: 'turn.text',
+          originalSize: turn.text.length,
+          compactedSize: compacted.length,
+          capsuleId: getDeterministicCapsuleId(turn.text),
+        });
+      }
+      return { ...turn, text: compacted };
     }
     return turn;
   }
@@ -99,35 +124,56 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
   // Handle string content property (OpenAI format)
   if (typeof turn.content === 'string' && !turn.parts) {
     if (!isRecent && !isInitial && turn.content.length > 2500) {
-      return { ...turn, content: compactNoiseText(turn.content, 'Historical Message', options) };
+      const compacted = compactNoiseText(turn.content, 'Historical Message', options);
+      if (tracker && compacted !== turn.content) {
+        tracker.recordItem({
+          type: 'Historical Message',
+          name: 'turn.content',
+          originalSize: turn.content.length,
+          compactedSize: compacted.length,
+          capsuleId: getDeterministicCapsuleId(turn.content),
+        });
+      }
+      return { ...turn, content: compacted };
     }
     return turn;
   }
 
-  // Handle array content property (Anthropic format: tool_result / text blocks)
+  // Handle array of content blocks (Anthropic / modern formats)
   if (Array.isArray(turn.content) && !turn.parts) {
-    const optimizedContent = turn.content.map((part) => {
-      if (!part || typeof part !== 'object') return part;
-      if (part.type === 'tool_result' || part.type === 'tool_call_output') {
-        const textVal = typeof part.content === 'string' ? part.content : (typeof part.output === 'string' ? part.output : '');
-        if (textVal.length > (isRecent ? 4000 : 1500)) {
-          const compacted = compactNoiseText(textVal, 'Tool Result', options);
-          return { ...part, content: compacted };
-        }
-      } else if (typeof part.text === 'string' && !isRecent && !isInitial && part.text.length > 2500) {
-        return { ...part, text: compactNoiseText(part.text, 'Historical Part', options) };
-      }
-      return part;
-    });
-    return { ...turn, content: optimizedContent };
+    turn = { ...turn, parts: turn.content };
   }
 
   if (!Array.isArray(turn.parts)) return turn;
 
   const optimizedParts = turn.parts.map((part) => {
-    if (!part) return part;
+    if (!part || typeof part !== 'object') return part;
 
-    // 1. Tool Responses (functionResponse)
+    // A. Generic tool result / output blocks
+    if (part.type === 'tool_result' || part.type === 'tool_call_output') {
+      const textVal = typeof part.content === 'string' ? part.content : (typeof part.output === 'string' ? part.output : '');
+      if (textVal.length > (isRecent ? 4000 : 1500)) {
+        const compacted = compactNoiseText(textVal, 'Tool Result', options);
+        const capsuleId = getDeterministicCapsuleId(textVal);
+        if (tracker && compacted !== textVal) {
+          tracker.recordItem({
+            type: 'Tool Result',
+            name: part.name || part.tool_name || 'tool_result',
+            originalSize: textVal.length,
+            compactedSize: compacted.length,
+            capsuleId,
+          });
+        }
+        return {
+          ...part,
+          content: typeof part.content === 'string' ? compacted : part.content,
+          output: typeof part.output === 'string' ? compacted : part.output,
+        };
+      }
+      return part;
+    }
+
+    // B. Native Gemini functionResponse
     if (part.functionResponse) {
       const fr = part.functionResponse;
       const resp = fr.response;
@@ -145,11 +191,9 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
           targetKey = 'content';
           out = resp.content;
         }
-      } else if (typeof resp === 'string') {
-        out = resp;
       }
 
-      if (out) {
+      if (targetKey && out.length > 0) {
         const isErr = isErrorOrFailure(out);
         // If it's a recent turn or an error, give it a larger allowance
         const limit = isRecent ? (isErr ? 8000 : 3000) : (isErr ? 2500 : 1200);
@@ -168,26 +212,26 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
 
           const compacted = isFile
             ? compactFileBlock(toolName, out, capsuleId, options)
-            : compactNoiseText(out, `Tool Result: ${toolName}`, options);
+            : compactNoiseText(out, `Tool: ${toolName}`, options);
 
-          if (targetKey && resp && typeof resp === 'object') {
-            return {
-              ...part,
-              functionResponse: {
-                ...fr,
-                response: {
-                  ...resp,
-                  [targetKey]: compacted,
-                },
-              },
-            };
+          if (tracker && compacted !== out) {
+            tracker.recordItem({
+              type: 'Tool Result',
+              name: toolName,
+              originalSize: out.length,
+              compactedSize: compacted.length,
+              capsuleId,
+            });
           }
 
           return {
             ...part,
             functionResponse: {
               ...fr,
-              response: compacted,
+              response: {
+                ...resp,
+                [targetKey]: compacted,
+              },
             },
           };
         }
@@ -195,16 +239,110 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
       return part;
     }
 
-    // 2. Text parts with noise or huge code dumps
+    // C. Text parts with noise or huge code dumps
     if (typeof part.text === 'string') {
       const txt = part.text;
       if (!isRecent && !isInitial && txt.length > 2500) {
         if (isNoiseContent(txt)) {
-          return { ...part, text: compactNoiseText(txt, 'Console/Diagnostic Log', options) };
+          const compacted = compactNoiseText(txt, 'Console/Diagnostic Log', options);
+          const capsuleId = getDeterministicCapsuleId(txt);
+          if (tracker && compacted !== txt) {
+            tracker.recordItem({
+              type: 'Diagnostic Log',
+              name: 'terminal output',
+              originalSize: txt.length,
+              compactedSize: compacted.length,
+              capsuleId,
+            });
+          }
+          return { ...part, text: compacted };
         }
-        const capsuleId = getDeterministicCapsuleId(txt);
-        return { ...part, text: compactFileBlock('', txt, capsuleId, options) };
+        if (isAgentToolResultText(txt) || txt.includes('```')) {
+          const capsuleId = getDeterministicCapsuleId(txt);
+          const compacted = compactFileBlock('', txt, capsuleId, options);
+          if (tracker && compacted !== txt) {
+            tracker.recordItem({
+              type: 'Historical Code',
+              name: 'code snippet',
+              originalSize: txt.length,
+              compactedSize: compacted.length,
+              capsuleId,
+            });
+          }
+          return { ...part, text: compacted };
+        }
       }
+    }
+
+    // D. Native Gemini inlineData (Images & Binary Attachments)
+    if (part.inlineData && typeof part.inlineData === 'object') {
+      const inline = part.inlineData;
+      const dataStr = typeof inline.data === 'string' ? inline.data : '';
+      const mime = inline.mimeType || 'image/png';
+
+      // Only compact historical turns (!isRecent && !isInitial)
+      // Recent turns MUST remain pristine so Gemini Vision can inspect new images
+      if (!isRecent && !isInitial && dataStr.length > 512) {
+        const capsuleId = getDeterministicCapsuleId(dataStr, 'jigit-img');
+        saveCapsule(capsuleId, dataStr, {
+          mimeType: mime,
+          size: dataStr.length,
+          type: 'image',
+          category: 'Image',
+          conversationId: options.conversationId || null,
+        }, options);
+
+        const sizeKb = (dataStr.length / 1024).toFixed(1);
+        const placeholder = `[JIGIT Engine: Historical image (${mime}, ${sizeKb} KB) analyzed and archived to capsule ${capsuleId}. Use MCP tool jigit_restore_capsule('${capsuleId}') to inspect original image.]`;
+
+        if (tracker) {
+          tracker.recordItem({
+            type: 'Historical Image',
+            name: mime,
+            originalSize: dataStr.length,
+            compactedSize: placeholder.length,
+            capsuleId,
+            details: `${sizeKb} KB`,
+          });
+        }
+
+        return { text: placeholder };
+      }
+      return part;
+    }
+
+    // E. Anthropic image blocks (type: "image")
+    if (part.type === 'image' && part.source && typeof part.source.data === 'string') {
+      const dataStr = part.source.data;
+      const mediaType = part.source.media_type || 'image/png';
+
+      if (!isRecent && !isInitial && dataStr.length > 512) {
+        const capsuleId = getDeterministicCapsuleId(dataStr, 'jigit-img');
+        saveCapsule(capsuleId, dataStr, {
+          mimeType: mediaType,
+          size: dataStr.length,
+          type: 'image',
+          category: 'Image',
+          conversationId: options.conversationId || null,
+        }, options);
+
+        const sizeKb = (dataStr.length / 1024).toFixed(1);
+        const placeholder = `[JIGIT Engine: Historical image (${mediaType}, ${sizeKb} KB) analyzed and archived to capsule ${capsuleId}. Use MCP tool jigit_restore_capsule('${capsuleId}') to inspect original image.]`;
+
+        if (tracker) {
+          tracker.recordItem({
+            type: 'Historical Image',
+            name: mediaType,
+            originalSize: dataStr.length,
+            compactedSize: placeholder.length,
+            capsuleId,
+            details: `${sizeKb} KB`,
+          });
+        }
+
+        return { type: 'text', text: placeholder };
+      }
+      return part;
     }
 
     return part;
@@ -217,33 +355,44 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
  * JIGIT Engine Pipeline:
  * - Preserves Turn Structure & Schema Validity (alternating user/model roles, functionCall/functionResponse pairing)
  * - Preserves Initial Task Intent (Turn 0)
- * - Preserves Active Workflow (Recent turns + pending tool calls)
- * - Compacts tool responses (read_file, run_command, terminal dumps) and noisy text into capsules
- * - Saves up to 70-90% prompt tokens while keeping full context accessible via MCP jigit_restore_capsule
+ * - Preserves Full Granularity on Recent Turns (keepRecentTurns, default 8)
+ * - Offloads historical tool outputs, image base64, and compiler logs to JIGIT Capsule Store
+ * - Instruments with detailed compression metrics via jigit-logger
  */
 function runJigitPipeline(turnsList, options = {}) {
   if (!Array.isArray(turnsList) || turnsList.length === 0) return [];
   const totalTurns = turnsList.length;
   const keepRecentTurns = options.keepRecentTurns || 8;
 
-  // In native Google Cloud Code / Gemini API, arbitrary slicing of turns risks:
-  // 1. Consecutive identical roles (user -> user), which triggers HTTP 400 Bad Request
-  // 2. Separating functionCall (model) from functionResponse (user), which triggers HTTP 400
-  // Instead, 95% of token consumption in coding workflows comes from massive tool outputs
-  // (file dumps, compiler errors, build logs) and historical text noise inside turn parts.
-  // By compacting all tool outputs and noise into capsules while preserving the turn graph,
-  // we achieve massive token reduction with 100% schema compliance.
-  return turnsList.map((turn, index) => {
-    const isInitial = index === 0;
+  const tracker = options.tracker || createCompressionTracker(options);
+  const originalChars = JSON.stringify(turnsList).length;
+
+  const optimized = turnsList.map((turn, index) => {
     const isRecent = index >= totalTurns - keepRecentTurns;
-    return optimizeTurnWithJigit(turn, isRecent, isInitial, options);
+    const isInitial = index === 0;
+    return optimizeTurnWithJigit(turn, isRecent, isInitial, { ...options, tracker });
   });
+
+  const optimizedChars = JSON.stringify(optimized).length;
+  tracker.finalize(originalChars, optimizedChars);
+
+  if (!options.silent) {
+    logCompressionSummary(tracker);
+  }
+
+  optimized._compressionTracker = tracker;
+  return optimized;
 }
 
-function enforceJigitBudget(promptText, maxChars = 38000) {
-  if (!promptText || promptText.length <= maxChars) return promptText;
-  const headSize = Math.round(maxChars * 0.3);
-  const tailSize = Math.round(maxChars * 0.7);
+/**
+ * Fast-path prompt budget enforcer for standalone prompt strings
+ */
+function enforceJigitBudget(promptText, maxChars = 60000) {
+  if (typeof promptText !== 'string' || promptText.length <= maxChars) {
+    return promptText;
+  }
+  const headSize = Math.floor(maxChars * 0.4);
+  const tailSize = Math.floor(maxChars * 0.5);
   const head = promptText.slice(0, headSize);
   const tail = promptText.slice(-tailSize);
   const omitted = promptText.length - (headSize + tailSize);
@@ -257,4 +406,5 @@ module.exports = {
   isNoiseContent,
   compactNoiseText,
   compactFileBlock,
+  optimizeTurnWithJigit,
 };

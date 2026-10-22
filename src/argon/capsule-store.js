@@ -89,8 +89,11 @@ function saveCapsule(capsuleId, content, metadata = {}) {
   }
 }
 
-function getCapsule(capsuleId, conversationId = null) {
+function getCapsule(capsuleId, conversationOrOptions = null) {
   if (!capsuleId) return null;
+  const conversationId = typeof conversationOrOptions === 'string'
+    ? conversationOrOptions
+    : (conversationOrOptions && typeof conversationOrOptions === 'object' ? conversationOrOptions.conversationId : null);
   try {
     const dir = getCapsuleDir();
 

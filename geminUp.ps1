@@ -10,7 +10,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TransportVersion = '1.5.3'
+$script:TransportVersion = '2.0.0'
 $script:TaskName = 'geminUp'
 $script:WatchdogTaskName = 'geminUp Watchdog'
 $script:ListenPort = 8877

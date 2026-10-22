@@ -2039,20 +2039,13 @@ async function handleCloudCodeWithJigit(req, res, rawBuf, isStream = true) {
         if (bodyJson.model) bodyJson.model = fallbackModel;
       }
 
-      // Context optimization via JIGIT Engine
+      // Context optimization via Jewish Tokenizer / JIGIT Engine
       if (Array.isArray(targetContents) && targetContents.length > 0) {
-        const originalChars = JSON.stringify(targetContents).length;
         const optimizedContents = runJigitPipeline(targetContents, { conversationId });
         if (hasReqObj) {
           bodyJson.request.contents = optimizedContents;
         } else {
           bodyJson.contents = optimizedContents;
-        }
-        const optimizedChars = JSON.stringify(optimizedContents).length;
-        const savedChars = originalChars - optimizedChars;
-        if (savedChars > 0) {
-          const chatTag = conversationId ? ` [Chat: ${conversationId.slice(0, 8)}]` : '';
-          console.info(`[JIGIT Token Saver]${chatTag} Compacted context: ${originalChars} -> ${optimizedChars} chars (saved ${savedChars} chars / ~${Math.round(savedChars / 4)} tokens)`);
         }
       }
 
