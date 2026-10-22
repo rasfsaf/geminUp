@@ -29,6 +29,9 @@ const {
   runJigitPipeline,
   enforceJigitBudget,
 } = require('./jigit-engine');
+const {
+  setActiveConversation,
+} = require('./capsule-store');
 const { ensureMcpRegistered } = require('./mcp-registration');
 
 const ANTIGRAVITY_IDE_SYSTEM_PROMPT = `# Role & Environment: Antigravity IDE Autonomous Pair Programmer
@@ -1931,21 +1934,60 @@ async function handleCloudCodeGenerateContent(req, res, bodyJson, rawBuf, isStre
 }
 ========================================================================= */
 
+function extractConversationId(bodyJson, rawStr) {
+  // 1. Direct JSON properties
+  if (bodyJson) {
+    const candidate =
+      bodyJson.conversationId ||
+      bodyJson.conversation_id ||
+      bodyJson.request?.conversationId ||
+      bodyJson.request?.conversation_id ||
+      bodyJson.metadata?.conversationId;
+    if (candidate && typeof candidate === 'string') return candidate;
+
+    // Check systemInstruction
+    const sys = bodyJson.systemInstruction || bodyJson.request?.systemInstruction;
+    if (sys && Array.isArray(sys.parts)) {
+      for (const p of sys.parts) {
+        if (typeof p.text === 'string') {
+          const m = p.text.match(/(?:Conversation ID:\s*|brain[\\\/]+)([a-f0-9-]{36})/i);
+          if (m) return m[1];
+        }
+      }
+    }
+  }
+
+  // 2. Fallback regex on raw request payload string
+  if (typeof rawStr === 'string') {
+    const m = rawStr.match(/(?:Conversation ID:\s*|brain[\\\/]+)([a-f0-9-]{36})/i);
+    if (m) return m[1];
+  }
+
+  return null;
+}
+
 /**
  * JIGIT-Powered Antigravity Cloud Code Pipeline
  * Transparent proxy to Antigravity's official Google Cloud Code backend (https://daily-cloudcode-pa.googleapis.com).
  * Uses native Antigravity authorization headers (Bearer tokens from the IDE) without Google account cookies.
  * Intercepts conversation turns and compresses large tool outputs (read_file, run_command, logs) into capsules,
  * cutting token consumption by 70-90% while keeping full context restorable via MCP jigit_restore_capsule.
+ * Scopes memory capsules strictly to the active conversation/chat session.
  */
 async function handleCloudCodeWithJigit(req, res, rawBuf, isStream = true) {
   let optimizedBuf = rawBuf;
-  dumpDebugPayload('handleCloudCodeWithJigit', req, null, rawBuf);
 
   try {
     const raw = rawBuf.toString('utf8');
     if (raw && raw.trim().startsWith('{')) {
       const bodyJson = JSON.parse(raw);
+      dumpDebugPayload('handleCloudCodeWithJigit', req, bodyJson, rawBuf);
+
+      const conversationId = extractConversationId(bodyJson, raw);
+      if (conversationId) {
+        setActiveConversation(conversationId);
+      }
+
       const hasReqObj = bodyJson && typeof bodyJson.request === 'object' && bodyJson.request !== null;
       const targetReq = hasReqObj ? bodyJson.request : bodyJson;
       const targetContents = targetReq?.contents;
@@ -1961,7 +2003,7 @@ async function handleCloudCodeWithJigit(req, res, rawBuf, isStream = true) {
       // Context optimization via JIGIT Engine
       if (Array.isArray(targetContents) && targetContents.length > 0) {
         const originalChars = JSON.stringify(targetContents).length;
-        const optimizedContents = runJigitPipeline(targetContents);
+        const optimizedContents = runJigitPipeline(targetContents, { conversationId });
         if (hasReqObj) {
           bodyJson.request.contents = optimizedContents;
         } else {
@@ -1970,11 +2012,14 @@ async function handleCloudCodeWithJigit(req, res, rawBuf, isStream = true) {
         const optimizedChars = JSON.stringify(optimizedContents).length;
         const savedChars = originalChars - optimizedChars;
         if (savedChars > 0) {
-          console.info(`[JIGIT Token Saver] Compacted context: ${originalChars} -> ${optimizedChars} chars (saved ${savedChars} chars / ~${Math.round(savedChars / 4)} tokens)`);
+          const chatTag = conversationId ? ` [Chat: ${conversationId.slice(0, 8)}]` : '';
+          console.info(`[JIGIT Token Saver]${chatTag} Compacted context: ${originalChars} -> ${optimizedChars} chars (saved ${savedChars} chars / ~${Math.round(savedChars / 4)} tokens)`);
         }
       }
 
       optimizedBuf = Buffer.from(JSON.stringify(bodyJson), 'utf8');
+    } else {
+      dumpDebugPayload('handleCloudCodeWithJigit', req, null, rawBuf);
     }
   } catch (err) {
     console.warn(`[JIGIT Token Saver] Error during context compression: ${err.message}. Forwarding original request.`);

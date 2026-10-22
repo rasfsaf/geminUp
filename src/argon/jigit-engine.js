@@ -47,8 +47,12 @@ function isNoiseContent(text) {
   );
 }
 
-function compactFileBlock(filepath, content, capsuleId) {
-  saveCapsule(capsuleId, content, { category: 'File', filepath });
+function compactFileBlock(filepath, content, capsuleId, options = {}) {
+  saveCapsule(capsuleId, content, {
+    category: 'File',
+    filepath,
+    conversationId: options.conversationId || null,
+  });
   const lines = content.split('\n');
   const preview = lines.slice(0, 4).join('\n').slice(0, 250);
   const tail = lines.slice(-2).join('\n').slice(0, 150);
@@ -57,10 +61,13 @@ function compactFileBlock(filepath, content, capsuleId) {
   return `[JIGIT Engine: Compacted ${label} (${totalLength} bytes; capsule=${capsuleId}). Use MCP tool jigit_restore_capsule('${capsuleId}') to inspect full original content. Preview:\n${preview}\n... [${totalLength - preview.length - tail.length} bytes omitted for low latency] ...\n${tail}]`;
 }
 
-function compactNoiseText(text, category = 'Diagnostic Log') {
+function compactNoiseText(text, category = 'Diagnostic Log', options = {}) {
   if (text.length <= 1200) return text;
   const capsuleId = getDeterministicCapsuleId(text);
-  saveCapsule(capsuleId, text, { category });
+  saveCapsule(capsuleId, text, {
+    category,
+    conversationId: options.conversationId || null,
+  });
   const head = text.slice(0, 500);
   const tail = text.slice(-400);
   const omitted = text.length - 900;
@@ -72,11 +79,11 @@ function isErrorOrFailure(text) {
   return /\b(?:error|failed|failure|exception|fatal|traceback|could not apply|invalid patch|old_string|not found|did not match)\b/i.test(text);
 }
 
-function optimizeTurnWithJigit(turn, isRecent, isInitial) {
+function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
   if (!turn) return turn;
   if (typeof turn === 'string') {
     if (!isRecent && !isInitial && turn.length > 2500) {
-      return compactNoiseText(turn, 'Historical Message');
+      return compactNoiseText(turn, 'Historical Message', options);
     }
     return turn;
   }
@@ -84,7 +91,7 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial) {
   // Handle plain text property
   if (typeof turn.text === 'string' && !turn.parts && !turn.content) {
     if (!isRecent && !isInitial && turn.text.length > 2500) {
-      return { ...turn, text: compactNoiseText(turn.text, 'Historical Message') };
+      return { ...turn, text: compactNoiseText(turn.text, 'Historical Message', options) };
     }
     return turn;
   }
@@ -92,7 +99,7 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial) {
   // Handle string content property (OpenAI format)
   if (typeof turn.content === 'string' && !turn.parts) {
     if (!isRecent && !isInitial && turn.content.length > 2500) {
-      return { ...turn, content: compactNoiseText(turn.content, 'Historical Message') };
+      return { ...turn, content: compactNoiseText(turn.content, 'Historical Message', options) };
     }
     return turn;
   }
@@ -104,11 +111,11 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial) {
       if (part.type === 'tool_result' || part.type === 'tool_call_output') {
         const textVal = typeof part.content === 'string' ? part.content : (typeof part.output === 'string' ? part.output : '');
         if (textVal.length > (isRecent ? 4000 : 1500)) {
-          const compacted = compactNoiseText(textVal, 'Tool Result');
+          const compacted = compactNoiseText(textVal, 'Tool Result', options);
           return { ...part, content: compacted };
         }
       } else if (typeof part.text === 'string' && !isRecent && !isInitial && part.text.length > 2500) {
-        return { ...part, text: compactNoiseText(part.text, 'Historical Part') };
+        return { ...part, text: compactNoiseText(part.text, 'Historical Part', options) };
       }
       return part;
     });
@@ -160,8 +167,8 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial) {
             out.startsWith('<!DOCTYPE');
 
           const compacted = isFile
-            ? compactFileBlock(toolName, out, capsuleId)
-            : compactNoiseText(out, `Tool Result: ${toolName}`);
+            ? compactFileBlock(toolName, out, capsuleId, options)
+            : compactNoiseText(out, `Tool Result: ${toolName}`, options);
 
           if (targetKey && resp && typeof resp === 'object') {
             return {
@@ -193,10 +200,10 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial) {
       const txt = part.text;
       if (!isRecent && !isInitial && txt.length > 2500) {
         if (isNoiseContent(txt)) {
-          return { ...part, text: compactNoiseText(txt, 'Console/Diagnostic Log') };
+          return { ...part, text: compactNoiseText(txt, 'Console/Diagnostic Log', options) };
         }
         const capsuleId = getDeterministicCapsuleId(txt);
-        return { ...part, text: compactFileBlock('', txt, capsuleId) };
+        return { ...part, text: compactFileBlock('', txt, capsuleId, options) };
       }
     }
 
@@ -229,7 +236,7 @@ function runJigitPipeline(turnsList, options = {}) {
   return turnsList.map((turn, index) => {
     const isInitial = index === 0;
     const isRecent = index >= totalTurns - keepRecentTurns;
-    return optimizeTurnWithJigit(turn, isRecent, isInitial);
+    return optimizeTurnWithJigit(turn, isRecent, isInitial, options);
   });
 }
 

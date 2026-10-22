@@ -1,6 +1,7 @@
 /**
  * JIGIT Capsule Store
  * Persistent LRU storage for compacted conversation turns, tool outputs, and build logs.
+ * Supports per-conversation isolation so MCP memory is strictly scoped to the active chat session.
  */
 
 const fs = require('fs');
@@ -9,9 +10,11 @@ const os = require('os');
 
 function getCapsuleDir() {
   const custom = process.env.ARGON_CAPSULE_DIR;
-  if (custom) return custom;
-  const programData = process.env.ProgramData || 'C:\\ProgramData';
-  const dir = path.join(programData, 'geminUp', 'argon', 'capsules');
+  let dir = custom;
+  if (!dir) {
+    const programData = process.env.ProgramData || 'C:\\ProgramData';
+    dir = path.join(programData, 'geminUp', 'argon', 'capsules');
+  }
   try {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -24,36 +27,96 @@ function getCapsuleDir() {
   return dir;
 }
 
-const MAX_CAPSULES = 200;
+const MAX_CAPSULES_PER_CONVO = 150;
+const MAX_GLOBAL_CAPSULES = 300;
+
+function setActiveConversation(conversationId) {
+  if (!conversationId || typeof conversationId !== 'string') return;
+  try {
+    const dir = getCapsuleDir();
+    const metaPath = path.join(dir, 'active_conversation.json');
+    fs.writeFileSync(
+      metaPath,
+      JSON.stringify({ conversationId, updatedAt: Date.now() }, null, 2),
+      'utf8'
+    );
+  } catch (e) {}
+}
+
+function getActiveConversationId() {
+  try {
+    const dir = getCapsuleDir();
+    const metaPath = path.join(dir, 'active_conversation.json');
+    if (fs.existsSync(metaPath)) {
+      const data = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      if (data && data.conversationId) return data.conversationId;
+    }
+  } catch (e) {}
+  return null;
+}
 
 function saveCapsule(capsuleId, content, metadata = {}) {
   if (!capsuleId || typeof content !== 'string') return;
   try {
     const dir = getCapsuleDir();
-    const filePath = path.join(dir, `${capsuleId}.json`);
+    const convoId = metadata.conversationId || getActiveConversationId() || 'global';
+    const convoDir = path.join(dir, convoId);
+    if (!fs.existsSync(convoDir)) {
+      fs.mkdirSync(convoDir, { recursive: true });
+    }
+
     const record = {
       id: capsuleId,
+      conversationId: convoId,
       category: metadata.category || 'General',
       filepath: metadata.filepath || null,
       length: content.length,
       timestamp: Date.now(),
       content,
     };
-    fs.writeFileSync(filePath, JSON.stringify(record), 'utf8');
-    pruneOldCapsules(dir);
+    const jsonStr = JSON.stringify(record);
+
+    // Save in conversation folder
+    fs.writeFileSync(path.join(convoDir, `${capsuleId}.json`), jsonStr, 'utf8');
+
+    // Also save in root capsule dir for instant global lookup by capsuleId
+    fs.writeFileSync(path.join(dir, `${capsuleId}.json`), jsonStr, 'utf8');
+
+    pruneOldCapsules(convoDir, MAX_CAPSULES_PER_CONVO);
+    pruneOldCapsules(dir, MAX_GLOBAL_CAPSULES);
   } catch (err) {
-    // Non-blocking: fail quietly if disk is full or read-only
+    // Non-blocking
   }
 }
 
-function getCapsule(capsuleId) {
+function getCapsule(capsuleId, conversationId = null) {
   if (!capsuleId) return null;
   try {
     const dir = getCapsuleDir();
-    const filePath = path.join(dir, `${capsuleId}.json`);
-    if (fs.existsSync(filePath)) {
-      const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      return data;
+
+    // 1. Check conversation folder if provided
+    if (conversationId && conversationId !== 'all' && conversationId !== '*') {
+      const convoFile = path.join(dir, conversationId, `${capsuleId}.json`);
+      if (fs.existsSync(convoFile)) {
+        return JSON.parse(fs.readFileSync(convoFile, 'utf8'));
+      }
+    }
+
+    // 2. Check root dir
+    const rootFile = path.join(dir, `${capsuleId}.json`);
+    if (fs.existsSync(rootFile)) {
+      return JSON.parse(fs.readFileSync(rootFile, 'utf8'));
+    }
+
+    // 3. Fallback: check subdirectories
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const ent of entries) {
+      if (ent.isDirectory()) {
+        const subFile = path.join(dir, ent.name, `${capsuleId}.json`);
+        if (fs.existsSync(subFile)) {
+          return JSON.parse(fs.readFileSync(subFile, 'utf8'));
+        }
+      }
     }
   } catch (err) {
     return null;
@@ -61,20 +124,40 @@ function getCapsule(capsuleId) {
   return null;
 }
 
-function listCapsules(limit = 20) {
+function listCapsules(limit = 20, conversationId = null) {
   try {
     const dir = getCapsuleDir();
     if (!fs.existsSync(dir)) return [];
-    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
+
+    const convoId = conversationId || getActiveConversationId();
+    let targetDir = dir;
+    let filterConvo = false;
+
+    if (convoId && convoId !== 'all' && convoId !== '*') {
+      const specificDir = path.join(dir, convoId);
+      if (fs.existsSync(specificDir)) {
+        targetDir = specificDir;
+      } else {
+        filterConvo = true;
+      }
+    }
+
+    const files = fs.readdirSync(targetDir).filter((f) => f.endsWith('.json') && f !== 'active_conversation.json');
     const items = [];
+
     for (const f of files) {
       try {
-        const full = path.join(dir, f);
+        const full = path.join(targetDir, f);
         const stat = fs.statSync(full);
+        if (stat.isDirectory()) continue;
         const raw = fs.readFileSync(full, 'utf8');
         const parsed = JSON.parse(raw);
+        if (filterConvo && parsed.conversationId && parsed.conversationId !== convoId) {
+          continue;
+        }
         items.push({
           id: parsed.id,
+          conversationId: parsed.conversationId || convoId || 'global',
           category: parsed.category,
           filepath: parsed.filepath,
           length: parsed.length,
@@ -92,22 +175,43 @@ function listCapsules(limit = 20) {
   }
 }
 
-function searchCapsules(query, limit = 5) {
+function searchCapsules(query, limit = 5, conversationId = null) {
   if (!query) return [];
   const q = String(query).toLowerCase();
   try {
     const dir = getCapsuleDir();
     if (!fs.existsSync(dir)) return [];
-    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
+
+    const convoId = conversationId || getActiveConversationId();
+    let targetDir = dir;
+    let filterConvo = false;
+
+    if (convoId && convoId !== 'all' && convoId !== '*') {
+      const specificDir = path.join(dir, convoId);
+      if (fs.existsSync(specificDir)) {
+        targetDir = specificDir;
+      } else {
+        filterConvo = true;
+      }
+    }
+
+    const files = fs.readdirSync(targetDir).filter((f) => f.endsWith('.json') && f !== 'active_conversation.json');
     const matched = [];
+
     for (const f of files) {
       try {
-        const full = path.join(dir, f);
+        const full = path.join(targetDir, f);
+        const stat = fs.statSync(full);
+        if (stat.isDirectory()) continue;
         const raw = fs.readFileSync(full, 'utf8');
         const parsed = JSON.parse(raw);
+        if (filterConvo && parsed.conversationId && parsed.conversationId !== convoId) {
+          continue;
+        }
         if (parsed.content && parsed.content.toLowerCase().includes(q)) {
           matched.push({
             id: parsed.id,
+            conversationId: parsed.conversationId || convoId || 'global',
             category: parsed.category,
             filepath: parsed.filepath,
             length: parsed.length,
@@ -132,16 +236,16 @@ function extractSnippet(text, query) {
   return (start > 0 ? '...' : '') + text.slice(start, end).replace(/[\r\n]+/g, ' ') + (end < text.length ? '...' : '');
 }
 
-function pruneOldCapsules(dir) {
+function pruneOldCapsules(dir, max = MAX_GLOBAL_CAPSULES) {
   try {
-    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
-    if (files.length <= MAX_CAPSULES) return;
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json') && f !== 'active_conversation.json');
+    if (files.length <= max) return;
     const stats = files.map((f) => ({
       file: f,
       mtime: fs.statSync(path.join(dir, f)).mtimeMs,
     }));
     stats.sort((a, b) => a.mtime - b.mtime);
-    const toRemove = stats.slice(0, files.length - MAX_CAPSULES);
+    const toRemove = stats.slice(0, files.length - max);
     for (const item of toRemove) {
       try {
         fs.unlinkSync(path.join(dir, item.file));
@@ -152,6 +256,8 @@ function pruneOldCapsules(dir) {
 
 module.exports = {
   getCapsuleDir,
+  setActiveConversation,
+  getActiveConversationId,
   saveCapsule,
   getCapsule,
   listCapsules,

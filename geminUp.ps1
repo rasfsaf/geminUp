@@ -2771,16 +2771,20 @@ function Clean-JewishTokenizerCapsules {
         Write-TransportLog INFO 'No capsules found.'
         return
     }
-    $files = @(Get-ChildItem -LiteralPath $capsuleDir -Filter '*.json' -ErrorAction SilentlyContinue)
+    $files = @(Get-ChildItem -LiteralPath $capsuleDir -Filter '*.json' -Recurse -ErrorAction SilentlyContinue)
     if ($files.Count -eq 0) {
         Write-TransportLog INFO 'No capsules found in memory.'
         return
     }
-    Write-Host "Found $($files.Count) JIGIT memory capsule(s) on disk." -ForegroundColor Cyan
+    Write-Host "Found $($files.Count) JIGIT memory capsule(s) on disk across all chat sessions." -ForegroundColor Cyan
     $confirm = Read-Host "Clean all $($files.Count) capsule file(s)? (y/N)"
     if ($confirm -eq 'y' -or $confirm -eq 'Y') {
         foreach ($f in $files) {
             Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+        }
+        $subdirs = @(Get-ChildItem -LiteralPath $capsuleDir -Directory -ErrorAction SilentlyContinue)
+        foreach ($d in $subdirs) {
+            Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
         }
         Write-TransportLog OK "Cleaned $($files.Count) capsule file(s)."
     } else {

@@ -3,13 +3,19 @@
  * JIGIT Memory MCP Server
  * Standard JSON-RPC 2.0 stdio Model Context Protocol (MCP) server for Antigravity IDE.
  * Allows autonomous agents to inspect and restore full content of JIGIT-compressed capsules.
+ * Supports per-conversation isolation so memory is strictly scoped to the active chat session.
  */
 
 const readline = require('readline');
-const { getCapsule, listCapsules, searchCapsules } = require('./capsule-store');
+const {
+  getCapsule,
+  listCapsules,
+  searchCapsules,
+  getActiveConversationId,
+} = require('./capsule-store');
 
 const SERVER_NAME = 'jigit-memory';
-const SERVER_VERSION = '1.0.0';
+const SERVER_VERSION = '1.1.0';
 
 const TOOLS = [
   {
@@ -22,13 +28,17 @@ const TOOLS = [
           type: 'string',
           description: "The unique capsule identifier, e.g. 'jigit-a1b2c3d4e5'",
         },
+        conversation_id: {
+          type: 'string',
+          description: 'Optional conversation ID to look up capsule. Defaults to the active chat session.',
+        },
       },
       required: ['capsule_id'],
     },
   },
   {
     name: 'jigit_list_capsules',
-    description: 'List recently saved JIGIT capsules with previews and metadata.',
+    description: 'List recently saved JIGIT capsules for the active chat session with previews and metadata.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -36,18 +46,30 @@ const TOOLS = [
           type: 'integer',
           description: 'Maximum number of capsules to return (default 10)',
         },
+        conversation_id: {
+          type: 'string',
+          description: 'Optional conversation ID (chat ID) to filter capsules. Defaults to active chat session.',
+        },
       },
     },
   },
   {
     name: 'jigit_search_memory',
-    description: 'Search through all compressed JIGIT capsules for specific strings, file paths, or error messages.',
+    description: 'Search through compressed JIGIT capsules for the active chat session for specific strings, file paths, or error messages.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
           description: 'Search query string',
+        },
+        conversation_id: {
+          type: 'string',
+          description: 'Optional conversation ID (chat ID) to scope search. Defaults to active chat session.',
+        },
+        limit: {
+          type: 'integer',
+          description: 'Maximum number of search results (default 5)',
         },
       },
       required: ['query'],
@@ -104,7 +126,8 @@ function handleRequest(req) {
 
     if (toolName === 'jigit_restore_capsule') {
       const capsuleId = args.capsule_id;
-      const data = getCapsule(capsuleId);
+      const convoId = args.conversation_id || getActiveConversationId();
+      const data = getCapsule(capsuleId, convoId);
       if (!data) {
         return sendResponse(id, {
           content: [
@@ -120,7 +143,7 @@ function handleRequest(req) {
         content: [
           {
             type: 'text',
-            text: `=== Restored Capsule: ${data.id} (${data.category || 'General'}, ${data.length} bytes) ===\n${data.content}`,
+            text: `=== Restored Capsule: ${data.id} (${data.category || 'General'}, ${data.length} bytes, chat: ${data.conversationId || 'global'}) ===\n${data.content}`,
           },
         ],
       });
@@ -128,7 +151,8 @@ function handleRequest(req) {
 
     if (toolName === 'jigit_list_capsules') {
       const limit = Number(args.limit) || 10;
-      const items = listCapsules(limit);
+      const convoId = args.conversation_id || getActiveConversationId();
+      const items = listCapsules(limit, convoId);
       return sendResponse(id, {
         content: [
           {
@@ -141,7 +165,9 @@ function handleRequest(req) {
 
     if (toolName === 'jigit_search_memory') {
       const query = args.query;
-      const results = searchCapsules(query);
+      const limit = Number(args.limit) || 5;
+      const convoId = args.conversation_id || getActiveConversationId();
+      const results = searchCapsules(query, limit, convoId);
       return sendResponse(id, {
         content: [
           {
