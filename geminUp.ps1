@@ -10,7 +10,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TransportVersion = '2.0.6'
+$script:TransportVersion = '2.0.7'
 $script:TaskName = 'geminUp'
 $script:WatchdogTaskName = 'geminUp Watchdog'
 $script:ListenPort = 8877
@@ -2141,6 +2141,36 @@ function Get-ArgonBridgeStatus {
     }
 }
 
+function Get-PlainSocksProxyUri {
+    param([string]$ConfigPath = $script:ConfigPath)
+    if (-not (Test-Path -LiteralPath $ConfigPath)) { return $null }
+    try {
+        Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
+        $raw = Get-Content -LiteralPath $ConfigPath -Raw -Encoding utf8 -ErrorAction Stop | ConvertFrom-Json
+        if (-not $raw.ProtectedProxy) { return $null }
+        $bytes = [Convert]::FromBase64String($raw.ProtectedProxy)
+        $entropy = [Text.Encoding]::UTF8.GetBytes('geminUp.Config.v2')
+        $dec = [Security.Cryptography.ProtectedData]::Unprotect($bytes, $entropy, [Security.Cryptography.DataProtectionScope]::LocalMachine)
+        $str = [Text.Encoding]::UTF8.GetString($dec)
+        $parts = $str -split '\r?\n'
+        if ($parts.Length -lt 2) { return $null }
+        $hostVal = $parts[0]
+        $portVal = [int]$parts[1]
+        $userVal = if ($parts.Length -gt 2) { $parts[2] } else { '' }
+        $passVal = if ($parts.Length -gt 3) { $parts[3] } else { '' }
+
+        if (-not [string]::IsNullOrWhiteSpace($userVal)) {
+            $uEnc = [Uri]::EscapeDataString($userVal)
+            $pEnc = [Uri]::EscapeDataString($passVal)
+            return "socks5://$($uEnc):$($pEnc)@$($hostVal):$($portVal)"
+        }
+        return "socks5://$($hostVal):$($portVal)"
+    }
+    catch {
+        return $null
+    }
+}
+
 function Start-ArgonBridge {
     param([switch]$SkipSonnetSync)
     Assert-SupportedWindows
@@ -2171,8 +2201,14 @@ function Start-ArgonBridge {
 
     Stop-ArgonBridge -Silent
 
-    $taskArguments = ('"{0}" --port {1} --host 127.0.0.1 --proxy http://127.0.0.1:{2}' -f $script:ArgonGatewayScript, $script:ArgonListenPort, $script:ListenPort)
-    Write-TransportLog INFO "Routing Jewish Tokenizer upstream via local geminUp proxy (127.0.0.1:$script:ListenPort)."
+    $socksUri = Get-PlainSocksProxyUri
+    if (-not [string]::IsNullOrWhiteSpace($socksUri)) {
+        $taskArguments = ('"{0}" --port {1} --host 127.0.0.1 --proxy "{2}"' -f $script:ArgonGatewayScript, $script:ArgonListenPort, $socksUri)
+        Write-TransportLog INFO "Routing Jewish Tokenizer upstream directly via protected SOCKS5 tunnel."
+    } else {
+        $taskArguments = ('"{0}" --port {1} --host 127.0.0.1 --proxy http://127.0.0.1:{2}' -f $script:ArgonGatewayScript, $script:ArgonListenPort, $script:ListenPort)
+        Write-TransportLog INFO "Routing Jewish Tokenizer upstream via local geminUp proxy (127.0.0.1:$script:ListenPort)."
+    }
 
     # Cleanup legacy task if present
     Unregister-ScheduledTask -TaskName 'geminUp Argon Bridge' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
@@ -2858,7 +2894,8 @@ function Show-JewishTokenizerMenu {
 
         $capsuleDir = Join-Path $script:ArgonDir 'capsules'
         $capsuleCount = if (Test-Path -LiteralPath $capsuleDir) { @(Get-ChildItem -LiteralPath $capsuleDir -Filter '*.json' -Recurse -File -ErrorAction SilentlyContinue).Count } else { 0 }
-        $transportRoute = if (Test-TransportListener -TimeoutMilliseconds 250) { "SOCKS5 (127.0.0.1:$script:ListenPort)" } else { 'Direct' }
+        $socksUri = Get-PlainSocksProxyUri
+        $transportRoute = if (-not [string]::IsNullOrWhiteSpace($socksUri)) { "Dedicated SOCKS5 (Direct upstream)" } elseif (Test-TransportListener -TimeoutMilliseconds 250) { "SOCKS5 (127.0.0.1:$script:ListenPort)" } else { 'Direct' }
         $savings = Get-JewishTokenizerSavings
 
         Write-Host '==================================================' -ForegroundColor Cyan

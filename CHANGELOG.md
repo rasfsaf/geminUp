@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [2.0.7] - 2026-10-25
+
+### RU (Русский)
+
+#### Прямое выделенное SOCKS5 туннелирование с авторизацией для Еврейского токенизатора
+- **Разделение пайплайнов (Split Pipelines):** Браузерный трафик (YouTube, Google) остаётся в стандартном шлюзе geminUp (`127.0.0.1:8877`). Трафик Antigravity при включении токенизатора теперь полностью изолирован и направляется напрямую в настроенный защищённый SOCKS5 сервер с RFC 1929 User/Password аутентификацией.
+- **Исключение промежуточных HTTP-посредников:** Полностью убран промежуточный локальный HTTP CONNECT прокси на порту 8877 для апстрима токенизатора. Токенизатор сам читает учетные данные из DPAPI-хранилища `config.json` и выполняет чистое удалённое разрешение DNS (ATYP 0x03) и TLS-рукопожатие с Google Cloud Code, гарантируя отсутствие утечек локального IP и предотвращая ошибку 400 Bad Request.
+
+### EN (English)
+
+#### Dedicated Authenticated SOCKS5 Upstream Tunneling for Jewish Tokenizer
+- **Split Pipeline Architecture:** Browser traffic (YouTube, Google services) continues routing through the standard geminUp tunnel (`127.0.0.1:8877`). Antigravity traffic with Jewish Tokenizer active is now completely isolated, routing directly to the configured protected SOCKS5 server using RFC 1929 username/password authentication.
+- **Elimination of Intermediate HTTP Proxies:** Removed the intermediate local HTTP CONNECT layer on port 8877 for tokenizer upstream requests. The tokenizer directly accesses DPAPI credentials from `config.json` and performs remote DNS resolution (ATYP 0x03) and TLS termination to Google Cloud Code, ensuring zero IP leakage and resolving HTTP 400 Bad Request.
+
+---
+
 ## [2.0.6] - 2026-10-25
 
 ### RU (Русский)

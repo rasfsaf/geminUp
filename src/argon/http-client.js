@@ -3,11 +3,10 @@ const https = require('node:https');
 const net = require('node:net');
 const tls = require('node:tls');
 
-function createSocks5Connection(proxyHost, proxyPort, targetHost, targetPort, timeoutMs = 15000) {
+function createSocks5Connection(proxyHost, proxyPort, username, password, targetHost, targetPort, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host: proxyHost, port: proxyPort });
     socket.setNoDelay(true);
-    let stage = 0;
     let timer = setTimeout(() => {
       socket.destroy();
       reject(new Error(`SOCKS5 proxy connection to ${proxyHost}:${proxyPort} timed out`));
@@ -18,48 +17,77 @@ function createSocks5Connection(proxyHost, proxyPort, targetHost, targetPort, ti
       reject(new Error(`SOCKS5 proxy error: ${err.message}`));
     });
 
-    socket.on('connect', () => {
-      // Step 1: Send client greeting (VER=5, NMETHODS=1, METHOD=0 [No Auth])
-      socket.write(Buffer.from([0x05, 0x01, 0x00]));
-      stage = 1;
+    socket.once('connect', () => {
+      // Step 1: Handshake. Methods: 0x00 (No Auth), 0x02 (User/Pass RFC 1929)
+      const methods = username ? [0x05, 0x02, 0x00, 0x02] : [0x05, 0x01, 0x00];
+      socket.write(Buffer.from(methods));
     });
 
-    socket.on('data', (data) => {
-      if (stage === 1) {
-        // Server choice
-        if (data.length < 2 || data[0] !== 0x05 || data[1] !== 0x00) {
+    let state = 'AUTH_CHOICE';
+
+    socket.on('data', (chunk) => {
+      if (state === 'AUTH_CHOICE') {
+        if (chunk[0] !== 0x05) {
           clearTimeout(timer);
           socket.destroy();
-          return reject(new Error('SOCKS5 proxy rejected authentication or unsupported version'));
+          return reject(new Error('Invalid SOCKS5 version in response'));
         }
-
-        // Step 2: Send connect command (VER=5, CMD=1, RSV=0, ATYP=3 [Domain], TargetHost, TargetPort)
-        const hostBuf = Buffer.from(targetHost, 'utf8');
-        const req = Buffer.alloc(4 + 1 + hostBuf.length + 2);
-        req[0] = 0x05;
-        req[1] = 0x01; // CONNECT
-        req[2] = 0x00; // RSV
-        req[3] = 0x03; // DOMAINNAME
-        req[4] = hostBuf.length;
-        hostBuf.copy(req, 5);
-        req.writeUInt16BE(targetPort, 5 + hostBuf.length);
-
-        stage = 2;
-        socket.write(req);
-      } else if (stage === 2) {
-        // Step 3: Server connect response
-        if (data.length < 4 || data[0] !== 0x05 || data[1] !== 0x00) {
+        const method = chunk[1];
+        if (method === 0x02) {
+          if (!username) {
+            clearTimeout(timer);
+            socket.destroy();
+            return reject(new Error('SOCKS5 server requires authentication but none provided'));
+          }
+          const uBuf = Buffer.from(username, 'utf8');
+          const pBuf = Buffer.from(password || '', 'utf8');
+          const authReq = Buffer.concat([
+            Buffer.from([0x01, uBuf.length]),
+            uBuf,
+            Buffer.from([pBuf.length]),
+            pBuf
+          ]);
+          state = 'AUTH_RESP';
+          socket.write(authReq);
+        } else if (method === 0x00) {
+          state = 'CONNECT_RESP';
+          sendConnect();
+        } else {
           clearTimeout(timer);
           socket.destroy();
-          return reject(new Error(`SOCKS5 proxy failed to connect to destination (rep code: ${data[1]})`));
+          return reject(new Error('SOCKS5 auth method rejected by proxy: ' + method));
         }
-
+      } else if (state === 'AUTH_RESP') {
+        if (chunk[1] !== 0x00) {
+          clearTimeout(timer);
+          socket.destroy();
+          return reject(new Error('SOCKS5 authentication failed with code: ' + chunk[1]));
+        }
+        state = 'CONNECT_RESP';
+        sendConnect();
+      } else if (state === 'CONNECT_RESP') {
+        if (chunk[1] !== 0x00) {
+          clearTimeout(timer);
+          socket.destroy();
+          return reject(new Error('SOCKS5 CONNECT failed with rep code: ' + chunk[1]));
+        }
         clearTimeout(timer);
         socket.removeAllListeners('data');
         socket.removeAllListeners('error');
         resolve(socket);
       }
     });
+
+    function sendConnect() {
+      // CMD=1 (CONNECT), RSV=0, ATYP=3 (Domain name - resolves remotely)
+      const hBuf = Buffer.from(targetHost, 'utf8');
+      const req = Buffer.concat([
+        Buffer.from([0x05, 0x01, 0x00, 0x03, hBuf.length]),
+        hBuf,
+        Buffer.from([ (targetPort >> 8) & 0xFF, targetPort & 0xFF ])
+      ]);
+      socket.write(req);
+    }
   });
 }
 
@@ -100,8 +128,46 @@ function createHttpConnectTunnel(proxyHost, proxyPort, targetHost, targetPort, t
 }
 
 function createAgent(proxyUrl) {
-  const effectiveProxy = proxyUrl || 'http://127.0.0.1:8877';
-  const parsed = new URL(effectiveProxy.replace(/^socks5?:\/\//i, 'http://'));
+  const effectiveProxy = proxyUrl || 'socks5://127.0.0.1:8877';
+  const isSocks = effectiveProxy.startsWith('socks5://') || effectiveProxy.startsWith('socks://');
+
+  if (isSocks) {
+    const parsed = new URL(effectiveProxy);
+    const proxyHost = parsed.hostname;
+    const proxyPort = Number(parsed.port) || 1080;
+    const username = parsed.username ? decodeURIComponent(parsed.username) : '';
+    const password = parsed.password ? decodeURIComponent(parsed.password) : '';
+
+    return new https.Agent({
+      keepAlive: true,
+      keepAliveMsecs: 15000,
+      maxSockets: 64,
+      maxFreeSockets: 16,
+      timeout: 120000,
+      createConnection(options, callback) {
+        createSocks5Connection(proxyHost, proxyPort, username, password, options.host, Number(options.port) || 443)
+          .then((rawSocket) => {
+            const tlsSocket = tls.connect({
+              socket: rawSocket,
+              servername: options.servername || options.host,
+            });
+            tlsSocket.setNoDelay(true);
+            const onError = (err) => {
+              rawSocket.destroy();
+              callback(err);
+            };
+            tlsSocket.once('error', onError);
+            tlsSocket.once('secureConnect', () => {
+              tlsSocket.removeListener('error', onError);
+              callback(null, tlsSocket);
+            });
+          })
+          .catch((err) => callback(err));
+      },
+    });
+  }
+
+  const parsed = new URL(effectiveProxy);
   const proxyHost = parsed.hostname || '127.0.0.1';
   const proxyPort = Number(parsed.port) || 8877;
 
