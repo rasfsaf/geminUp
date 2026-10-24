@@ -10,7 +10,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TransportVersion = '2.0.5'
+$script:TransportVersion = '2.0.6'
 $script:TaskName = 'geminUp'
 $script:WatchdogTaskName = 'geminUp Watchdog'
 $script:ListenPort = 8877
@@ -2171,8 +2171,8 @@ function Start-ArgonBridge {
 
     Stop-ArgonBridge -Silent
 
-    $taskArguments = ('"{0}" --port {1} --host 127.0.0.1 --proxy socks5://127.0.0.1:{2}' -f $script:ArgonGatewayScript, $script:ArgonListenPort, $script:ListenPort)
-    Write-TransportLog INFO "Routing Jewish Tokenizer upstream via local geminUp SOCKS5 (127.0.0.1:$script:ListenPort)."
+    $taskArguments = ('"{0}" --port {1} --host 127.0.0.1 --proxy http://127.0.0.1:{2}' -f $script:ArgonGatewayScript, $script:ArgonListenPort, $script:ListenPort)
+    Write-TransportLog INFO "Routing Jewish Tokenizer upstream via local geminUp proxy (127.0.0.1:$script:ListenPort)."
 
     # Cleanup legacy task if present
     Unregister-ScheduledTask -TaskName 'geminUp Argon Bridge' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
@@ -2788,6 +2788,62 @@ function Clean-JewishTokenizerCapsules {
 
 Set-Alias -Name Test-ArgonPipeline -Value Test-JewishTokenizer -ErrorAction SilentlyContinue
 
+function Get-JewishTokenizerSavings {
+    $logFile = Join-Path $script:ArgonDir 'logs\compression.log'
+    $default = @{ SavedTokens = 0; SavedTokenStr = '0'; ReductionPct = '0%'; SavedPercentage = '0%' }
+    if (-not (Test-Path -LiteralPath $logFile)) { return $default }
+
+    try {
+        $nodeScript = @"
+const fs = require('fs');
+const file = '$($logFile.Replace('\', '\\'))';
+try {
+  const stats = fs.statSync(file);
+  const fd = fs.openSync(file, 'r');
+  const readBytes = Math.min(stats.size, 1048576);
+  const buf = Buffer.alloc(readBytes);
+  fs.readSync(fd, buf, 0, readBytes, stats.size - readBytes);
+  fs.closeSync(fd);
+  const lines = buf.toString('utf8').split('\n');
+  let savedTok = 0, orig = 0, savedCh = 0;
+  for (const l of lines) {
+    if (l.startsWith('JSON:')) {
+      try {
+        const d = JSON.parse(l.slice(5));
+        savedTok += d.savedTokens || 0;
+        orig += d.originalChars || 0;
+        savedCh += d.savedChars || 0;
+      } catch {}
+    }
+  }
+  const pct = orig > 0 ? ((savedCh / orig) * 100).toFixed(1) : '0';
+  let tokStr = savedTok.toLocaleString();
+  if (savedTok >= 1000000) tokStr = (savedTok / 1000000).toFixed(2) + ' M';
+  else if (savedTok >= 1000) tokStr = (savedTok / 1000).toFixed(1) + ' k';
+  console.log(JSON.stringify({ savedTok, tokStr, pct: pct + '%' }));
+} catch (e) {
+  console.log(JSON.stringify({ savedTok: 0, tokStr: '0', pct: '0%' }));
+}
+"@
+        $nodeExe = Get-NodeExecutable
+        if ($nodeExe) {
+            $raw = & $nodeExe -e $nodeScript
+            if ($raw) {
+                $parsed = ConvertFrom-Json -InputObject $raw -ErrorAction SilentlyContinue
+                if ($parsed) {
+                    return @{
+                        SavedTokens = [int64]$parsed.savedTok
+                        SavedTokenStr = [string]$parsed.tokStr
+                        ReductionPct = [string]$parsed.pct
+                        SavedPercentage = [string]$parsed.pct
+                    }
+                }
+            }
+        }
+    } catch { }
+    return $default
+}
+
 function Show-JewishTokenizerMenu {
     while ($true) {
         Clear-Host
@@ -2803,6 +2859,7 @@ function Show-JewishTokenizerMenu {
         $capsuleDir = Join-Path $script:ArgonDir 'capsules'
         $capsuleCount = if (Test-Path -LiteralPath $capsuleDir) { @(Get-ChildItem -LiteralPath $capsuleDir -Filter '*.json' -Recurse -File -ErrorAction SilentlyContinue).Count } else { 0 }
         $transportRoute = if (Test-TransportListener -TimeoutMilliseconds 250) { "SOCKS5 (127.0.0.1:$script:ListenPort)" } else { 'Direct' }
+        $savings = Get-JewishTokenizerSavings
 
         Write-Host '==================================================' -ForegroundColor Cyan
         Write-Host '  Jewish Tokenizer (Antigravity Token Saver Proxy)' -ForegroundColor Cyan
@@ -2816,7 +2873,7 @@ function Show-JewishTokenizerMenu {
         Write-Host "  Upstream Tunnel:    $transportRoute" -ForegroundColor White
         Write-Host '  Authorization:      100% Native IDE Credentials (Zero Google Cookies)' -ForegroundColor Green
         Write-Host "  JIGIT Capsules:     $capsuleCount active capsule(s) stored on disk" -ForegroundColor Cyan
-        Write-Host '  Token Savings:      60% - 90% prompt tokens per multi-turn request' -ForegroundColor Green
+        Write-Host "  Total Saved Tokens: $($savings.SavedTokenStr) tokens (-$($savings.ReductionPct))" -ForegroundColor Green
         Write-Host "  Proxy Endpoint:     http://127.0.0.1:$script:ArgonListenPort" -ForegroundColor DarkGray
         Write-Host ''
         Write-Host '  1. Start & Activate Jewish Tokenizer (Launch Proxy + Apply IDE Route)'

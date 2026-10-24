@@ -63,42 +63,47 @@ function createSocks5Connection(proxyHost, proxyPort, targetHost, targetPort, ti
   });
 }
 
-function createAgent(proxyUrl) {
-  const effectiveProxy = proxyUrl || 'socks5://127.0.0.1:8877';
+function createHttpConnectTunnel(proxyHost, proxyPort, targetHost, targetPort, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: proxyHost, port: proxyPort });
+    socket.setNoDelay(true);
+    let timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`Proxy connection to ${proxyHost}:${proxyPort} timed out`));
+    }, timeoutMs);
 
-  const parsed = new URL(effectiveProxy);
-  if (parsed.protocol.startsWith('socks')) {
-    const proxyHost = parsed.hostname;
-    const proxyPort = Number(parsed.port) || 1080;
-
-    return new https.Agent({
-      keepAlive: true,
-      keepAliveMsecs: 15000,
-      maxSockets: 64,
-      maxFreeSockets: 16,
-      timeout: 120000,
-      createConnection(options, callback) {
-        createSocks5Connection(proxyHost, proxyPort, options.host, Number(options.port) || 443)
-          .then((rawSocket) => {
-            const tlsSocket = tls.connect({
-              socket: rawSocket,
-              servername: options.servername || options.host,
-            });
-            tlsSocket.setNoDelay(true);
-            const onError = (err) => {
-              rawSocket.destroy();
-              callback(err);
-            };
-            tlsSocket.once('error', onError);
-            tlsSocket.once('secureConnect', () => {
-              tlsSocket.removeListener('error', onError);
-              callback(null, tlsSocket);
-            });
-          })
-          .catch((err) => callback(err));
-      },
+    socket.once('error', (err) => {
+      clearTimeout(timer);
+      reject(new Error(`Proxy socket error: ${err.message}`));
     });
-  }
+
+    socket.on('connect', () => {
+      socket.write(`CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\nProxy-Connection: Keep-Alive\r\n\r\n`);
+    });
+
+    let buffer = '';
+    const onData = (chunk) => {
+      buffer += chunk.toString('utf8');
+      if (buffer.includes('\r\n\r\n')) {
+        clearTimeout(timer);
+        socket.removeListener('data', onData);
+        if (buffer.startsWith('HTTP/1.1 200') || buffer.startsWith('HTTP/1.0 200') || buffer.includes(' 200 ')) {
+          resolve(socket);
+        } else {
+          socket.destroy();
+          reject(new Error(`Proxy tunnel rejected: ${buffer.split('\r\n')[0]}`));
+        }
+      }
+    };
+    socket.on('data', onData);
+  });
+}
+
+function createAgent(proxyUrl) {
+  const effectiveProxy = proxyUrl || 'http://127.0.0.1:8877';
+  const parsed = new URL(effectiveProxy.replace(/^socks5?:\/\//i, 'http://'));
+  const proxyHost = parsed.hostname || '127.0.0.1';
+  const proxyPort = Number(parsed.port) || 8877;
 
   return new https.Agent({
     keepAlive: true,
@@ -106,6 +111,26 @@ function createAgent(proxyUrl) {
     maxSockets: 64,
     maxFreeSockets: 16,
     timeout: 120000,
+    createConnection(options, callback) {
+      createHttpConnectTunnel(proxyHost, proxyPort, options.host, Number(options.port) || 443)
+        .then((rawSocket) => {
+          const tlsSocket = tls.connect({
+            socket: rawSocket,
+            servername: options.servername || options.host,
+          });
+          tlsSocket.setNoDelay(true);
+          const onError = (err) => {
+            rawSocket.destroy();
+            callback(err);
+          };
+          tlsSocket.once('error', onError);
+          tlsSocket.once('secureConnect', () => {
+            tlsSocket.removeListener('error', onError);
+            callback(null, tlsSocket);
+          });
+        })
+        .catch((err) => callback(err));
+    },
   });
 }
 

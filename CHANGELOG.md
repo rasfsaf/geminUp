@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [2.0.6] - 2026-10-25
+
+### RU (Русский)
+
+#### HTTP CONNECT туннелирование upstream и статистика экономии токенов
+- **Переход на протокол HTTP CONNECT к шлюзу geminUp:** Локальный транспорт geminUp (`127.0.0.1:8877`) работает как защищенный HTTP CONNECT прокси. Ранее токенизатор инициировал raw SOCKS5 handshake, что приводило к зависанию на таймаутах сокетов и аварийным сбросам соединений. Реализовано нативное HTTP CONNECT туннелирование с мгновенным TLS-рукопожатием, что полностью устранило зависания и ошибку 400 Bad Request (`User location is not supported for the API use`).
+- **Счетчик экономии контекста в CLI:** В меню Еврейского токенизатора добавлено отображение суммарного объема сэкономленных токенов и процента сокращения контекста (`Total Saved Tokens: X tokens (-Y%)`), вычисляемое на основе логов сжатия в реальном времени.
+- **Очистка оставшихся упоминаний Argon:** Вся терминология и статусные плашки интерфейса приведены к единому стилю «Еврейский токенизатор».
+
+### EN (English)
+
+#### HTTP CONNECT Upstream Tunneling & Token Savings Statistics
+- **HTTP CONNECT Tunneling to geminUp Proxy:** The local geminUp transport (`127.0.0.1:8877`) operates as an HTTP CONNECT proxy. Previously, the tokenizer attempted raw SOCKS5 handshakes, causing socket stalls, timeouts, and connection aborts. Implemented native HTTP CONNECT tunneling with instant TLS negotiation, completely resolving hangs and the HTTP 400 Bad Request (`User location is not supported for the API use`) error.
+- **Context Savings Counter in CLI Menu:** Added real-time token savings and context reduction percentage tracking to the Jewish Tokenizer CLI menu (`Total Saved Tokens: X tokens (-Y%)`), computed directly from compression metrics.
+- **Legacy Argon Label Cleanup:** Replaced remaining Argon labels and status references across the CLI interface with Jewish Tokenizer.
+
+---
+
 ## [2.0.5] - 2026-10-25
 
 ### RU (Русский)

@@ -56,7 +56,7 @@ function parseArgs() {
   const options = {
     port: Number(process.env.ARGON_PORT) || 8083,
     host: process.env.ARGON_HOST || '127.0.0.1',
-    proxy: process.env.ARGON_PROXY || 'socks5://127.0.0.1:8877',
+    proxy: process.env.ARGON_PROXY || 'http://127.0.0.1:8877',
     storagePath: process.env.ARGON_ACCOUNTS_FILE || null,
   };
 
