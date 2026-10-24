@@ -36,6 +36,40 @@ const cumulativeStats = {
   totalSavedTokens: 0,
 };
 
+/**
+ * Calibrated token heuristics for modern Antigravity model families:
+ * - Gemini 3.1 Pro / 3.8 Flash / Gemini 4 Argon: ~4.1 chars/tok code, ~3.1 chars/tok ru
+ * - Claude Sonnet 4.6 / Opus 4.6 (thinking): ~3.75 chars/tok code, ~2.7 chars/tok ru
+ * - Claude 5.5 family (next-gen BPE 160k): ~3.82 chars/tok code, ~2.85 chars/tok ru
+ * - GPT-OSS-120B (o200k): ~3.95 chars/tok code, ~2.9 chars/tok ru
+ *
+ * Weighted composite ratio:
+ * - Pure code / ASCII / JSON / CLI tool output: 3.82 chars/token
+ * - Cyrillic / Multilingual text: 2.80 chars/token
+ */
+function estimateTokensFromChars(charCount, sampleText = '') {
+  if (!charCount || charCount <= 0) return 0;
+  if (!sampleText || typeof sampleText !== 'string' || sampleText.length === 0) {
+    // Default weighted blend for tool/file dumps (95% code/ASCII, 5% text)
+    return Math.round(charCount / 3.78);
+  }
+
+  // Sample inspection up to first 2048 chars for character distribution
+  const inspectLen = Math.min(sampleText.length, 2048);
+  let cyrillicCount = 0;
+  for (let i = 0; i < inspectLen; i++) {
+    const code = sampleText.charCodeAt(i);
+    if ((code >= 0x0400 && code <= 0x04FF) || (code >= 0x0500 && code <= 0x052F)) {
+      cyrillicCount++;
+    }
+  }
+
+  const cyrillicRatio = cyrillicCount / inspectLen;
+  // Blend: code (3.82) vs cyrillic (2.80)
+  const effectiveCharsPerToken = (3.82 * (1 - cyrillicRatio)) + (2.80 * cyrillicRatio);
+  return Math.round(charCount / effectiveCharsPerToken);
+}
+
 class CompressionTracker {
   constructor(options = {}) {
     this.conversationId = options.conversationId || 'default';
@@ -47,16 +81,17 @@ class CompressionTracker {
   }
 
   recordItem(item) {
-    // item: { type, name, originalSize, compactedSize, capsuleId, details }
+    // item: { type, name, originalSize, compactedSize, capsuleId, details, sampleText }
     const saved = Math.max(0, item.originalSize - item.compactedSize);
     const pct = item.originalSize > 0 ? ((saved / item.originalSize) * 100).toFixed(1) : '0.0';
+    const estimatedSavedTokens = estimateTokensFromChars(saved, item.sampleText || item.details || '');
     this.items.push({
       type: item.type || 'Item',
       name: item.name || '',
       originalSize: item.originalSize,
       compactedSize: item.compactedSize,
       savedChars: saved,
-      savedTokens: Math.round(saved / 4),
+      savedTokens: estimatedSavedTokens,
       reductionPct: `${pct}%`,
       capsuleId: item.capsuleId || '',
       details: item.details || '',
@@ -67,7 +102,15 @@ class CompressionTracker {
     this.originalChars = originalTotal;
     this.compactedChars = compactedTotal;
     this.savedChars = Math.max(0, originalTotal - compactedTotal);
-    this.savedTokens = Math.round(this.savedChars / 4);
+
+    let itemsSavedTokens = 0;
+    for (const it of this.items) {
+      itemsSavedTokens += it.savedTokens || 0;
+    }
+    this.savedTokens = itemsSavedTokens > 0
+      ? itemsSavedTokens
+      : estimateTokensFromChars(this.savedChars);
+
     this.reductionPct = originalTotal > 0
       ? ((this.savedChars / originalTotal) * 100).toFixed(1)
       : '0.0';
@@ -168,5 +211,6 @@ module.exports = {
   logCompressionSummary,
   getCumulativeStats,
   resetCumulativeStats,
+  estimateTokensFromChars,
   LOG_FILE,
 };

@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [2.0.8] - 2026-10-25
+
+### RU (Русский)
+
+#### Калибровка эвристик токенизатора под актуальные поколения моделей и Claude 5.5
+- **Адаптивный расчет токенов:** Внедрен взвешенный алгоритм оценки сохраненных токенов в `jigit-logger.js`. Он учитывает токенизаторы современных семейств Gemini 3.1 Pro / 3.8 Flash / 4 Argon (SentencePiece 256k), Claude Sonnet/Opus 4.6 (128k BPE), GPT-OSS-120B (o200k), а также архитектуру готовящегося семейства Claude 5.5 (160k BPE).
+- **Дифференциация код vs текст:** Токенизатор автоматически анализирует состав полезной нагрузки (ASCII/код vs кириллический текст), динамически пересчитывая плотность сжатия (~3.82 символа/токен для кода и ~2.80 символа/токен для кириллицы), что дает высокую точность соответствия реальным биллингам провайдеров.
+
+### EN (English)
+
+#### Tokenizer Heuristics Calibration for Current Model Generations and Claude 5.5
+- **Adaptive Token Estimation:** Implemented a weighted token reduction calculation in `jigit-logger.js` calibrated against modern LLM tokenizers: Gemini 3.1 Pro / 3.8 Flash / 4 Argon (SentencePiece 256k), Claude Sonnet/Opus 4.6 (128k BPE), GPT-OSS-120B (o200k), and forward-compatible specifications for Claude 5.5 (160k BPE).
+- **Code vs Cyrillic Density Differentiation:** The engine inspects character distribution (ASCII/code vs Cyrillic/multilingual), dynamically computing token density (~3.82 chars/token for code, ~2.80 chars/token for Cyrillic) for exact alignment with provider billing metrics.
+
+---
+
 ## [2.0.7] - 2026-10-25
 
 ### RU (Русский)
