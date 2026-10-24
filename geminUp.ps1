@@ -10,7 +10,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TransportVersion = '2.0.4'
+$script:TransportVersion = '2.0.5'
 $script:TaskName = 'geminUp'
 $script:WatchdogTaskName = 'geminUp Watchdog'
 $script:ListenPort = 8877
@@ -1767,7 +1767,7 @@ function Show-TransportStatus {
     $argonStatus = Get-ArgonBridgeStatus
     if ($argonStatus.Installed -or $argonStatus.Listening) {
         $argonLabel = if ($argonStatus.Listening) { "running (PID $($argonStatus.Pid))" } else { 'stopped' }
-        Write-Host ('  Argon bridge:  {0} on port {1}' -f $argonLabel, $script:ArgonListenPort)
+        Write-Host ('  Jewish Tokenizer: {0} on port {1}' -f $argonLabel, $script:ArgonListenPort)
     }
 }
 
@@ -2171,14 +2171,8 @@ function Start-ArgonBridge {
 
     Stop-ArgonBridge -Silent
 
-    $taskArguments = ('"{0}" --port {1} --host 127.0.0.1' -f $script:ArgonGatewayScript, $script:ArgonListenPort)
-    if (Test-TransportListener -TimeoutMilliseconds 300) {
-        $taskArguments += " --proxy socks5://127.0.0.1:$script:ListenPort"
-        Write-TransportLog INFO "Routing Jewish Tokenizer upstream via local geminUp SOCKS5 (127.0.0.1:$script:ListenPort)."
-    }
-    else {
-        Write-TransportLog INFO 'geminUp SOCKS5 is not running; Jewish Tokenizer will connect directly.'
-    }
+    $taskArguments = ('"{0}" --port {1} --host 127.0.0.1 --proxy socks5://127.0.0.1:{2}' -f $script:ArgonGatewayScript, $script:ArgonListenPort, $script:ListenPort)
+    Write-TransportLog INFO "Routing Jewish Tokenizer upstream via local geminUp SOCKS5 (127.0.0.1:$script:ListenPort)."
 
     # Cleanup legacy task if present
     Unregister-ScheduledTask -TaskName 'geminUp Argon Bridge' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null

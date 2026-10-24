@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [2.0.5] - 2026-10-25
+
+### RU (Русский)
+
+#### Устранение утечки прямого IP в Google и защита SOCKS5-пайплайна
+- **Жесткая фиксация SOCKS5-шлюза (Fail-Closed):** Устранена первопричина ошибки 400 Bad Request (User location is not supported for the API use). Еврейский токенизатор теперь по умолчанию и безальтернативно направляет все запросы в локальный защищенный туннель geminUp (socks5://127.0.0.1:8877). Полностью исключен fallback на прямой незащищенный интернет (direct), сливавший реальный IP пользователя в Google Cloud Code.
+- **Обновление статуса в CLI:** В основном меню статуса geminUp строка устаревшего названия Argon bridge переименована в Jewish Tokenizer.
+
+### EN (English)
+
+#### Direct IP Leak Prevention and SOCKS5 Upstream Hardening
+- **Strict SOCKS5 Upstream Routing (Fail-Closed):** Resolved the root cause of HTTP 400 Bad Request (User location is not supported for the API use). The Jewish Tokenizer proxy now strictly defaults all upstream requests through the local geminUp protected SOCKS5 tunnel (socks5://127.0.0.1:8877). Eliminated the unproxied fallback path (direct) that previously exposed the user's real IP address to Google Cloud Code endpoints.
+- **CLI Status Label Update:** In the main geminUp status view, the legacy label Argon bridge has been updated to Jewish Tokenizer.
+
+---
+
 ## [2.0.4] - 2026-10-23
 
 ### RU (Русский)

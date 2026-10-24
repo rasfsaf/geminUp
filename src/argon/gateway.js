@@ -56,7 +56,7 @@ function parseArgs() {
   const options = {
     port: Number(process.env.ARGON_PORT) || 8083,
     host: process.env.ARGON_HOST || '127.0.0.1',
-    proxy: process.env.ARGON_PROXY || null,
+    proxy: process.env.ARGON_PROXY || 'socks5://127.0.0.1:8877',
     storagePath: process.env.ARGON_ACCOUNTS_FILE || null,
   };
 
@@ -1135,7 +1135,7 @@ async function forwardToGoogleCloudCode(req, res, reqBuffer, timeoutMs = 300000,
         path: upstreamUrl.pathname + upstreamUrl.search,
         method: req.method,
         headers,
-        agent: httpAgent || directHttpsAgent,
+        agent: httpAgent,
         timeout: timeoutMs,
       };
 
@@ -1232,7 +1232,7 @@ async function _legacyForwardAvailableModels(req, res, reqBuffer) {
       path: upstreamUrl.pathname + upstreamUrl.search,
       method: req.method,
       headers,
-      agent: httpAgent || directHttpsAgent,
+      agent: httpAgent,
       timeout: 15000,
     };
 

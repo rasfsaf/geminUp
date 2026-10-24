@@ -64,17 +64,9 @@ function createSocks5Connection(proxyHost, proxyPort, targetHost, targetPort, ti
 }
 
 function createAgent(proxyUrl) {
-  if (!proxyUrl) {
-    return new https.Agent({
-      keepAlive: true,
-      keepAliveMsecs: 15000,
-      maxSockets: 64,
-      maxFreeSockets: 16,
-      timeout: 120000,
-    });
-  }
+  const effectiveProxy = proxyUrl || 'socks5://127.0.0.1:8877';
 
-  const parsed = new URL(proxyUrl);
+  const parsed = new URL(effectiveProxy);
   if (parsed.protocol.startsWith('socks')) {
     const proxyHost = parsed.hostname;
     const proxyPort = Number(parsed.port) || 1080;
@@ -108,7 +100,6 @@ function createAgent(proxyUrl) {
     });
   }
 
-  // Fallback for standard HTTP proxy
   return new https.Agent({
     keepAlive: true,
     keepAliveMsecs: 15000,
