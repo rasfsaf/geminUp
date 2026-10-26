@@ -2091,7 +2091,7 @@ async function handleCloudCodeWithJigit(req, res, rawBuf, isStream = true) {
       if (targetReq && targetReq.generationConfig && targetReq.generationConfig.thinkingConfig) {
         const tb = targetReq.generationConfig.thinkingConfig.thinkingBudget;
         if (tb === -1 || tb > 2048) {
-          targetReq.generationConfig.thinkingConfig.thinkingBudget = 2048;
+          // // disabled budget override: targetReq.generationConfig.thinkingConfig.thinkingBudget = 2048;
         }
       }
 

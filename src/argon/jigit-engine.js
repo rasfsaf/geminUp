@@ -61,7 +61,7 @@ function compactFileBlock(filepath, content, capsuleId, options = {}) {
   const tail = lines.slice(-2).join('\n').slice(0, 150);
   const totalLength = content.length;
   const label = filepath ? `File: ${filepath}` : 'File/Code Dump';
-  return `[JIGIT Engine: Compacted ${label} (${totalLength} bytes; capsule=${capsuleId}). Use MCP tool jigit_restore_capsule('${capsuleId}') to inspect full original content. Preview:\n${preview}\n... [${totalLength - preview.length - tail.length} bytes omitted for low latency] ...\n${tail}]`;
+  return `[JIGIT Engine: Compacted ${label} (${totalLength} bytes; capsule=${capsuleId}). Use call_mcp_tool(ServerName='jigit-memory', ToolName='jigit_restore_capsule', Arguments={capsule_id: '${capsuleId}') to inspect full original content. Preview:\n${preview}\n... [${totalLength - preview.length - tail.length} bytes omitted for low latency] ...\n${tail}]`;
 }
 
 function breakRepetitiveLoops(text) {
@@ -119,7 +119,7 @@ function compactNoiseText(text, category = 'Diagnostic Log', options = {}) {
   const head = text.slice(0, 500);
   const tail = text.slice(-400);
   const omitted = text.length - 900;
-  return `${head}\n\n[JIGIT Engine: ${category} truncated (${omitted} chars omitted; capsule=${capsuleId}). Use MCP tool jigit_restore_capsule('${capsuleId}') if full details are needed.]\n\n${tail}`;
+  return `${head}\n\n[JIGIT Engine: ${category} truncated (${omitted} chars omitted; capsule=${capsuleId}). Use call_mcp_tool(ServerName='jigit-memory', ToolName='jigit_restore_capsule', Arguments={capsule_id: '${capsuleId}') if full details are needed.]\n\n${tail}`;
 }
 
 function isErrorOrFailure(text) {
@@ -215,7 +215,7 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
     // A. Generic tool result / output blocks
     if (part.type === 'tool_result' || part.type === 'tool_call_output') {
       const textVal = typeof part.content === 'string' ? part.content : (typeof part.output === 'string' ? part.output : '');
-      if (textVal.length > (isRecent ? 4000 : 1500)) {
+      if (!isRecent && textVal.length > 1500) {
         const compacted = compactNoiseText(textVal, 'Tool Result', options);
         const capsuleId = getDeterministicCapsuleId(textVal);
         if (tracker && compacted !== textVal) {
@@ -259,9 +259,8 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
       if (targetKey && out.length > 0) {
         const isErr = isErrorOrFailure(out);
         // If it's a recent turn or an error, give it a larger allowance
-        const limit = isRecent ? (isErr ? 8000 : 3000) : (isErr ? 2500 : 1200);
-
-        if (out.length > limit) {
+        // Never compress tool outputs on recent turns — the model must always read raw results on first inspection!
+        if (!isRecent && out.length > (isErr ? 2500 : 1200)) {
           const toolName = fr.name || 'tool';
           const capsuleId = getDeterministicCapsuleId(out);
           const isFile =
@@ -429,7 +428,7 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
         }, options);
 
         const sizeKb = (dataStr.length / 1024).toFixed(1);
-        const placeholder = `[JIGIT Engine: Historical image (${mime}, ${sizeKb} KB) analyzed and archived to capsule ${capsuleId}. Use MCP tool jigit_restore_capsule('${capsuleId}') to inspect original image.]`;
+        const placeholder = `[JIGIT Engine: Historical image (${mime}, ${sizeKb} KB) analyzed and archived to capsule ${capsuleId}. Use call_mcp_tool(ServerName='jigit-memory', ToolName='jigit_restore_capsule', Arguments={capsule_id: '${capsuleId}') to inspect original image.]`;
 
         if (tracker) {
           tracker.recordItem({
@@ -463,7 +462,7 @@ function optimizeTurnWithJigit(turn, isRecent, isInitial, options = {}) {
         }, options);
 
         const sizeKb = (dataStr.length / 1024).toFixed(1);
-        const placeholder = `[JIGIT Engine: Historical image (${mediaType}, ${sizeKb} KB) analyzed and archived to capsule ${capsuleId}. Use MCP tool jigit_restore_capsule('${capsuleId}') to inspect original image.]`;
+        const placeholder = `[JIGIT Engine: Historical image (${mediaType}, ${sizeKb} KB) analyzed and archived to capsule ${capsuleId}. Use call_mcp_tool(ServerName='jigit-memory', ToolName='jigit_restore_capsule', Arguments={capsule_id: '${capsuleId}') to inspect original image.]`;
 
         if (tracker) {
           tracker.recordItem({
