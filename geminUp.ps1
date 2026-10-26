@@ -10,7 +10,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TransportVersion = '2.0.9'
+$script:TransportVersion = '2.0.10'
 $script:TaskName = 'geminUp'
 $script:WatchdogTaskName = 'geminUp Watchdog'
 $script:ListenPort = 8877
@@ -2825,8 +2825,31 @@ function Clean-JewishTokenizerCapsules {
 Set-Alias -Name Test-ArgonPipeline -Value Test-JewishTokenizer -ErrorAction SilentlyContinue
 
 function Get-JewishTokenizerSavings {
+    $statsFile = Join-Path $script:ArgonDir 'logs\cumulative_stats.json'
     $logFile = Join-Path $script:ArgonDir 'logs\compression.log'
     $default = @{ SavedTokens = 0; SavedTokenStr = '0'; ReductionPct = '0%'; SavedPercentage = '0%' }
+
+    if (Test-Path -LiteralPath $statsFile) {
+        try {
+            $json = Get-Content -LiteralPath $statsFile -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($json -and $json.totalSavedTokens) {
+                $savedTok = [int64]$json.totalSavedTokens
+                $pct = if ($json.overallReductionPct) { [string]$json.overallReductionPct } else { '0.0%' }
+                $tokStr = $savedTok.ToString('N0')
+                if ($savedTok -ge 1000000000) { $tokStr = ('{0:F2} B' -f ($savedTok / 1000000000)) }
+                elseif ($savedTok -ge 1000000) { $tokStr = ('{0:F2} M' -f ($savedTok / 1000000)) }
+                elseif ($savedTok -ge 1000) { $tokStr = ('{0:F1} k' -f ($savedTok / 1000)) }
+
+                return @{
+                    SavedTokens = $savedTok
+                    SavedTokenStr = $tokStr
+                    ReductionPct = $pct
+                    SavedPercentage = $pct
+                }
+            }
+        } catch {}
+    }
+
     if (-not (Test-Path -LiteralPath $logFile)) { return $default }
 
     try {
@@ -2854,7 +2877,8 @@ try {
   }
   const pct = orig > 0 ? ((savedCh / orig) * 100).toFixed(1) : '0';
   let tokStr = savedTok.toLocaleString();
-  if (savedTok >= 1000000) tokStr = (savedTok / 1000000).toFixed(2) + ' M';
+  if (savedTok >= 1000000000) tokStr = (savedTok / 1000000000).toFixed(2) + ' B';
+  else if (savedTok >= 1000000) tokStr = (savedTok / 1000000).toFixed(2) + ' M';
   else if (savedTok >= 1000) tokStr = (savedTok / 1000).toFixed(1) + ' k';
   console.log(JSON.stringify({ savedTok, tokStr, pct: pct + '%' }));
 } catch (e) {
@@ -2876,7 +2900,10 @@ try {
                 }
             }
         }
-    } catch { }
+    } catch {
+        # Fallback to zero
+    }
+
     return $default
 }
 

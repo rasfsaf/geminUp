@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 
 ---
 
+## [2.0.10] - 2026-10-26
+
+### RU (Русский)
+
+#### Накопительный счетчик сэкономленных токенов и ротация логов JIGIT
+- **Постоянный счетчик экономии (`cumulative_stats.json`):** Устранена проблема «проседания» и колебания отображаемых сэкономленных токенов в меню. Теперь статистика ведется накопительно на диске и агрегирует реальный объем сэкономленных токенов и символов по всем сессиям, не сбрасываясь при смене чата.
+- **Поддержка миллиардных объемов (B):** В форматирование вывода меню добавлена поддержка отображения сэкономленных токенов в миллиардах (`B` / Billions) наряду с `M` и `k`.
+- **Автоматическая ротация логов:** Введен лимит размера файла `compression.log` (10 МБ). При превышении лимита лог автоматически обрезается до последних 2 МБ без потери исторической статистики.
+
+### EN (English)
+
+#### Persistent Cumulative Token Counter & Automatic Log Rotation
+- **Persistent Cumulative Storage (`cumulative_stats.json`):** Fixed intermittent fluctuations and dropping token counters in the CLI menu. Total token and character savings are now aggregated persistently across all sessions and requests, preventing counter drops when switching between long and short chats.
+- **Billion Token Scale Support (B):** Added formatting support for billion-token thresholds (`B`) alongside existing `M` and `k` suffixes.
+- **Automated Log Rotation:** Introduced a 10 MB threshold for `compression.log`. Once exceeded, the log automatically trims to the most recent 2 MB while preserving all historical savings statistics.
+
+---
+
 ## [2.0.9] - 2026-10-26
 
 ### RU (Русский)
