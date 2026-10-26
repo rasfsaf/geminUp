@@ -14,6 +14,7 @@ All notable changes to this project are documented in this file.
 - **Первичное чтение файлов без сжатия:** Устранено преждевременное сжатие вывода инструментов при первом чтении (`isRecent`). Теперь агент свободно и полностью видит содержимое прочитанных файлов и вывод свежих команд терминала, а архивация в капсулы происходит только для более ранних исторических шагов диалога.
 - **Исправление реджекта модели Gemini 3.8 Flash:** Удалена принудительная перезапись параметра `thinkingBudget: 2048`, вызывавшая ошибку `model unavailable` при обращении к профилю `gemini-3.8-flash-medium` через Google Cloud Code.
 - **Поддержка нативного Vision-контекста:** Обеспечена корректная передача исходных медиа/изображений в мультимодальные модели без повреждения активного контекста.
+- **Актуализация документации по подменю токенизатора:** В README.md и README.ru.md исправлена нумерация шагов активации еврейского токенизатора (пункт 1 для старта и авто-маршрутизации, пункт 3 для ручного переключения).
 
 ### EN (English)
 
@@ -22,6 +23,7 @@ All notable changes to this project are documented in this file.
 - **Unrestricted Initial File & Tool Inspection:** Removed premature compression on recent tool results (`isRecent`). The assistant can now inspect complete, uncompacted file contents and diagnostic command outputs on their first pass, reserving capsule compaction exclusively for older conversation history.
 - **Resolved Gemini 3.8 Flash Rejection:** Removed hardcoded `thinkingBudget: 2048` override in request headers, which caused Google Cloud Code upstream endpoints to return `model unavailable` when querying the `gemini-3.8-flash-medium` profile.
 - **Multimodal Image Context Preservation:** Guaranteed consistent pass-through and lifecycle handling for active visual payloads to prevent context desynchronization in vision models.
+- **Documentation Alignment for Tokenizer Submenu:** Corrected menu step references in README.md and README.ru.md to match the actual CLI submenu layout (Option 1 for start & auto-route activation, Option 3 for toggle routing).
 
 ---
 

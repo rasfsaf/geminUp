@@ -104,7 +104,7 @@ socks5://username:password@host:port
 
 1. **Включение в Antigravity IDE:**
    - Запусти `geminUp.bat` -> выбери пункт `8` (`Jewish Tokenizer: Context Compression Proxy`);
-   - Включи маршрутизацию (пункт `7`: `Toggle Antigravity Route`);
+   - Выбери пункт `1` (`Start & Activate Jewish Tokenizer`) — запустит прокси и активирует маршрутизацию IDE (или пункт `3` для переключения маршрута);
    - Перезапусти Antigravity IDE.
 2. **OpenAI-совместимые клиенты (Roo Code / Cline / Cursor / OpenCode):**
    - Base URL: `http://127.0.0.1:8083/v1`
